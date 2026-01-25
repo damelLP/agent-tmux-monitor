@@ -1,0 +1,107 @@
+#!/bin/bash
+# ATM Hook - Unified Claude Code hook handler
+# Handles all hook events: PreToolUse, PostToolUse, StatusLine, etc.
+#
+# CRITICAL: This script MUST:
+# - Always exit 0 (never break Claude Code)
+# - Be non-blocking (100ms timeout)
+# - Handle daemon unavailability gracefully
+
+set -o pipefail
+
+SOCKET="${ATM_SOCKET:-/tmp/atm.sock}"
+DEBUG="${ATM_DEBUG:-0}"
+
+# Debug logging (disabled by default)
+log_debug() {
+    if [ "$DEBUG" = "1" ]; then
+        echo "$(date -Iseconds) [atm-hook] $1" >> /tmp/atm-hook.log
+    fi
+}
+
+# Quick check - daemon available?
+if [ ! -S "$SOCKET" ]; then
+    log_debug "Socket not found: $SOCKET"
+    exit 0
+fi
+
+# Read hook event JSON from stdin (single read, not a loop!)
+input=$(cat)
+
+if [ -z "$input" ]; then
+    log_debug "Empty input received"
+    exit 0
+fi
+
+log_debug "Received: ${input:0:200}..."
+
+# Detect hook type from input
+# StatusLine events don't have hook_event_name, they have different structure
+HOOK_EVENT=$(echo "$input" | jq -r '.hook_event_name // empty' 2>/dev/null)
+SESSION_ID=$(echo "$input" | jq -r '.session_id // empty' 2>/dev/null)
+
+if [ -z "$SESSION_ID" ]; then
+    log_debug "No session_id in input"
+    exit 0
+fi
+
+# Determine message type based on presence of hook_event_name
+if [ -z "$HOOK_EVENT" ]; then
+    # No hook_event_name = StatusLine event
+    MSG_TYPE="status_update"
+    log_debug "StatusLine update for session $SESSION_ID"
+else
+    # Has hook_event_name = Hook event (PreToolUse, PostToolUse, etc.)
+    MSG_TYPE="hook_event"
+    TOOL_NAME=$(echo "$input" | jq -r '.tool_name // empty' 2>/dev/null)
+    log_debug "Hook: $HOOK_EVENT for session $SESSION_ID (tool: $TOOL_NAME)"
+fi
+
+# Build protocol messages
+CONNECT_MSG=$(cat <<EOF
+{"protocol_version":{"major":1,"minor":0},"type":"connect","client_id":"hook-$SESSION_ID-$$"}
+EOF
+)
+
+# Add PID and tmux pane to the data
+TMUX_PANE_ID="${TMUX_PANE:-}"
+if [ -n "$TMUX_PANE_ID" ]; then
+    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$PPID" --arg tmux_pane "$TMUX_PANE_ID" '{
+        "protocol_version": {"major": 1, "minor": 0},
+        "type": $type,
+        "data": (. + {pid: $pid, tmux_pane: $tmux_pane})
+    }' <<< "$input" 2>/dev/null)
+else
+    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$PPID" '{
+        "protocol_version": {"major": 1, "minor": 0},
+        "type": $type,
+        "data": (. + {pid: $pid})
+    }' <<< "$input" 2>/dev/null)
+fi
+
+if [ -z "$DATA_MSG" ] || [ "$DATA_MSG" = "null" ]; then
+    log_debug "Failed to build message"
+    exit 0
+fi
+
+# Send messages to daemon with timeout (non-blocking)
+if command -v socat &>/dev/null; then
+    {
+        echo "$CONNECT_MSG"
+        echo "$DATA_MSG"
+    } | timeout 0.1 socat -t0.1 - "UNIX-CONNECT:$SOCKET" >/dev/null 2>&1 || {
+        log_debug "Failed to send via socat"
+    }
+else
+    {
+        echo "$CONNECT_MSG"
+        echo "$DATA_MSG"
+    } | timeout 0.1 nc -U "$SOCKET" >/dev/null 2>&1 || {
+        log_debug "Failed to send via nc"
+    }
+fi
+
+log_debug "Message sent successfully"
+
+# ALWAYS exit 0 - never break Claude Code
+exit 0

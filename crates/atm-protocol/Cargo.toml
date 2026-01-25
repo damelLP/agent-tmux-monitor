@@ -1,0 +1,21 @@
+[package]
+name = "atm-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Wire protocol for ATM daemon communication"
+readme = "../../README.md"
+
+[dependencies]
+atm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -1,0 +1,143 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      publish_crates:
+        description: 'Publish to crates.io'
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        run: |
+          DIRNAME="atm-${{ github.ref_name }}"
+          mkdir "$DIRNAME"
+          cp target/${{ matrix.target }}/release/atm "$DIRNAME/"
+          cp target/${{ matrix.target }}/release/atmd "$DIRNAME/"
+          cp scripts/atm-hook "$DIRNAME/"
+          chmod +x "$DIRNAME"/*
+          tar -czvf "atm-${{ matrix.target }}.tar.gz" "$DIRNAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: atm-${{ matrix.target }}
+          path: atm-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/**/atm-*.tar.gz
+            scripts/install.sh
+          generate_release_notes: true
+
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    # Only run on manual trigger with publish_crates=true
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_crates
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Verify crate builds
+        run: cargo build --release
+
+      - name: Publish crates in dependency order
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set -e
+          echo "Publishing atm-core..."
+          cargo publish -p atm-core
+
+          echo "Waiting for crates.io index update..."
+          sleep 30
+
+          echo "Publishing atm-protocol..."
+          cargo publish -p atm-protocol
+
+          echo "Waiting for crates.io index update..."
+          sleep 30
+
+          echo "Publishing atm-tui and atmd in parallel..."
+          cargo publish -p atm-tui &
+          cargo publish -p atmd &
+          wait
+
+          echo "Waiting for crates.io index update..."
+          sleep 30
+
+          echo "Publishing root atm package..."
+          cargo publish -p atm
+
+          echo "All crates published successfully!"

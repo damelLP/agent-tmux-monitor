@@ -1,0 +1,103 @@
+[package]
+name = "atm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Real-time monitoring dashboard for Claude Code agents across tmux sessions"
+readme = "README.md"
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/atm-core",
+    "crates/atm-protocol",
+    "crates/atmd",
+    "crates/atm",
+]
+
+[[bin]]
+name = "atm"
+path = "src/bin/atm.rs"
+
+[[bin]]
+name = "atmd"
+path = "src/bin/atmd.rs"
+
+# cargo-binstall support
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/atm-{ target }.tar.gz"
+bin-dir = "atm-{ version }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/damelLP/agent-tmux-monitor"
+authors = ["damelLP"]
+keywords = ["claude", "monitoring", "tmux", "tui", "agents"]
+categories = ["command-line-utilities", "development-tools"]
+
+[workspace.dependencies]
+# Core dependencies
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1.0"
+
+# Async runtime
+tokio = { version = "1.35", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+
+# TUI
+ratatui = "0.29"
+crossterm = "0.28"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# System monitoring
+sysinfo = "0.32"
+
+# Error handling
+anyhow = "1.0"
+
+# CLI argument parsing
+clap = { version = "4.4", features = ["derive"] }
+
+# Testing
+tempfile = "3.14"
+
+# Internal crates (version required for crates.io, path for local dev)
+atm-core = { version = "0.1.0", path = "crates/atm-core" }
+atm-protocol = { version = "0.1.0", path = "crates/atm-protocol" }
+atm-tui = { version = "0.1.0", path = "crates/atm" }
+atmd = { version = "0.1.0", path = "crates/atmd" }
+
+[dependencies]
+# Required for root package to compile the binaries
+atm-core = { workspace = true }
+atm-protocol = { workspace = true }
+atm-tui = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+ratatui = { workspace = true }
+crossterm = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sysinfo = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+daemonize = "0.5"
+dirs = "5.0"
+libc = "0.2"
+atmd = { workspace = true }

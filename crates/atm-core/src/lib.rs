@@ -1,0 +1,27 @@
+//! ATM Core - Shared types for Claude Code monitoring
+//!
+//! This crate provides the core domain types shared between
+//! the daemon (atmd) and TUI (atm).
+//!
+//! All code follows the panic-free policy: no `.unwrap()`, `.expect()`,
+//! `panic!()`, `unreachable!()`, `todo!()`, or direct indexing `[i]`.
+
+pub mod agent;
+pub mod context;
+pub mod cost;
+pub mod error;
+pub mod hook;
+pub mod model;
+pub mod session;
+
+// Re-exports for convenience
+pub use agent::AgentType;
+pub use context::{ContextUsage, TokenCount};
+pub use cost::Money;
+pub use error::{DomainError, DomainResult};
+pub use hook::HookEventType;
+pub use model::Model;
+pub use session::{
+    DisplayState, LinesChanged, SessionDomain, SessionDuration, SessionId, SessionInfrastructure,
+    SessionStatus, SessionView, ToolUseId, ToolUsageRecord, TranscriptPath,
+};

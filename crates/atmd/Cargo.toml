@@ -1,0 +1,37 @@
+[package]
+name = "atmd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "ATM daemon - session registry and broadcast server for Claude Code monitoring"
+readme = "../../README.md"
+
+[lib]
+name = "atmd"
+path = "src/lib.rs"
+
+[dependencies]
+atm-core = { workspace = true }
+atm-protocol = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+sysinfo = { workspace = true }
+anyhow = { workspace = true }
+clap = { workspace = true }
+daemonize = "0.5"
+dirs = "5.0"
+libc = "0.2"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
+tempfile = { workspace = true }

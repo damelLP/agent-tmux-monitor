@@ -1,0 +1,26 @@
+# Rust
+/target/
+**/*.rs.bk
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Testing
+*.log
+*.tmp
+
+# Local config
+.env
+.env.local
+*.local.json
+
+# Claude Code local settings
+.claude/settings.local.json

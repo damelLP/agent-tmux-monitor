@@ -1,0 +1,22 @@
+[package]
+name = "atm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Core domain types for ATM - Claude Code agent monitoring"
+readme = "../../README.md"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+procfs = "0.17"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
