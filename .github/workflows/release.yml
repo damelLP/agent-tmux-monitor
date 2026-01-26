@@ -148,16 +148,18 @@ jobs:
             fi
 
             echo "Publishing..."
-            if cargo publish -p "$crate" 2>&1; then
+            local output
+            if output=$(cargo publish -p "$crate" 2>&1); then
+              echo "$output"
               echo "✓ Published successfully"
               echo "::endgroup::"
               return 0
             fi
 
-            # Double-check: maybe it was published despite error (race condition)
-            sleep 5
-            if is_published "$crate" "$version"; then
-              echo "✓ Published (confirmed after retry)"
+            # Check if error was "already exists" (crates.io index was slow)
+            echo "$output"
+            if echo "$output" | grep -q "already exists"; then
+              echo "✓ Already published (detected from cargo error)"
               echo "::endgroup::"
               return 0
             fi
