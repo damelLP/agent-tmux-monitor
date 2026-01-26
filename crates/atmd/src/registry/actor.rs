@@ -784,7 +784,7 @@ impl RegistryActor {
 
         info!(
             count = to_remove.len(),
-            "Cleaning up sessions"
+            "Cleaning up stale/dead sessions"
         );
 
         // Remove each session
@@ -802,11 +802,12 @@ impl RegistryActor {
             self.sessions_by_pid.remove(&pid);
             self.session_id_to_pid.remove(&session_id);
 
-            debug!(
+            // Use warn! so it shows up without RUST_LOG=debug
+            warn!(
                 session_id = %session_id,
                 reason = %reason,
                 details = %log_details,
-                "Removed session"
+                "Session removed by cleanup"
             );
 
             // Publish removed event

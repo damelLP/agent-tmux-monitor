@@ -941,18 +941,35 @@ impl SessionInfrastructure {
     pub fn is_process_alive(&self) -> bool {
         let Some(pid) = self.pid else {
             // No PID tracked - assume alive (can't determine)
+            debug!(pid = ?self.pid, "is_process_alive: no PID tracked, assuming alive");
             return true;
         };
 
         let Some(expected_start_time) = self.process_start_time else {
             // No start time recorded - just check if process exists via procfs
-            return procfs::process::Process::new(pid as i32).is_ok();
+            let exists = procfs::process::Process::new(pid as i32).is_ok();
+            debug!(pid, exists, "is_process_alive: no start_time, checking procfs only");
+            return exists;
         };
 
         // Check if process exists and has same start time
         match read_process_start_time(pid) {
-            Some(current_start_time) => current_start_time == expected_start_time,
-            None => false, // Process doesn't exist
+            Some(current_start_time) => {
+                let alive = current_start_time == expected_start_time;
+                if !alive {
+                    debug!(
+                        pid,
+                        expected_start_time,
+                        current_start_time,
+                        "is_process_alive: start time MISMATCH - PID reused?"
+                    );
+                }
+                alive
+            }
+            None => {
+                debug!(pid, expected_start_time, "is_process_alive: process NOT FOUND in /proc");
+                false
+            }
         }
     }
 
