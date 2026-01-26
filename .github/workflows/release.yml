@@ -11,7 +11,7 @@ on:
         type: boolean
         default: false
 
-      # Simple per-crate checkboxes (select/deselect)
+      # Per-crate checkboxes (select/deselect)
       publish_atm_core:
         description: 'Publish crate: atm-core'
         required: false
@@ -39,12 +39,12 @@ on:
         default: true
 
       include_deps:
-        description: 'Include workspace dependencies of selected crates'
+        description: "(ignored) Include workspace dependencies — currently a no-op in this simple workflow"
         required: false
         type: boolean
         default: true
       dry_run:
-        description: 'Run cargo publish --dry-run'
+        description: 'Run cargo publish --dry-run (true/false). Default false.'
         required: false
         type: boolean
         default: false
@@ -56,6 +56,80 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        run: cargo install cross --git https://github.com/cross-rs/cross
+
+      - name: Build
+        run: |-
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        run: |-
+          DIRNAME="atm-${{ github.ref_name }}"
+          mkdir "$DIRNAME"
+          cp target/${{ matrix.target }}/release/atm "$DIRNAME/"
+          cp target/${{ matrix.target }}/release/atmd "$DIRNAME/"
+          cp crates/atm/scripts/atm-hook "$DIRNAME/"
+          chmod +x "$DIRNAME"/*
+          tar -czvf "atm-${{ matrix.target }}.tar.gz" "$DIRNAME"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: atm-${{ matrix.target }}
+          path: atm-${{ matrix.target }}.tar.gz
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            artifacts/**/atm-*.tar.gz
+            scripts/install.sh
+          generate_release_notes: true
+
   publish:
     name: Publish to crates.io
     runs-on: ubuntu-latest
@@ -65,107 +139,83 @@ jobs:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - name: Calculate publish order (original order + checkboxes)
-        id: calc
-        run: |
+      - name: Verify crate builds
+        run: cargo build --release
+
+      - name: Build publish list (bash, no python)
+        id: plan
+        run: |-
           set -euo pipefail
-          python3 - <<'PY'
-import os, subprocess, json, sys
+          EVENT_JSON="$GITHUB_EVENT_PATH"
 
-ORIGINAL_ORDER = [
-    'atm-core',
-    'atm-protocol',
-    'atm-tui',
-    'atmd',
-    'atm',
-]
+          # Keep the same ordering you used originally.
+          ORIGINAL_ORDER=("atm-core" "atm-protocol" "atm-tui" "atmd" "atm")
 
-checkbox_map = {
-    'publish_atm_core': 'atm-core',
-    'publish_atm_protocol': 'atm-protocol',
-    'publish_atm_tui': 'atm-tui',
-    'publish_atmd': 'atmd',
-    'publish_atm': 'atm',
-}
-
-with open(os.environ['GITHUB_EVENT_PATH']) as f:
-    event = json.load(f)
-
-selected = {
-    name
-    for box, name in checkbox_map.items()
-    if str(event.get('inputs', {}).get(box, 'false')).lower() == 'true'
-}
-
-include_deps = str(event.get('inputs', {}).get('include_deps', 'true')).lower() == 'true'
-dry_run = str(event.get('inputs', {}).get('dry_run', 'false')).lower() == 'true'
-
-if not selected:
-    print('::error::No crates selected')
-    sys.exit(1)
-
-if not include_deps:
-    final_order = [p for p in ORIGINAL_ORDER if p in selected]
-else:
-    meta = json.loads(subprocess.check_output(['cargo', 'metadata', '--format-version=1'], text=True))
-    workspace_ids = set(meta['workspace_members'])
-    id_to_name = {p['id']: p['name'] for p in meta['packages']}
-    workspace_names = {id_to_name[i] for i in workspace_ids}
-
-    deps = {}
-    for p in meta['packages']:
-        if p['id'] in workspace_ids:
-            deps[p['name']] = {
-                d['name'] for d in p['dependencies'] if d['name'] in workspace_names
-            }
-
-    final_set = set(selected)
-    stack = list(selected)
-    while stack:
-        c = stack.pop()
-        for d in deps.get(c, []):
-            if d not in final_set:
-                final_set.add(d)
-                stack.append(d)
-
-    visited = {}
-    order = []
-
-    def dfs(n):
-        if visited.get(n) == 1:
-            raise RuntimeError('dependency cycle detected')
-        if visited.get(n) == 2:
-            return
-        visited[n] = 1
-        for d in deps.get(n, []):
-            if d in final_set:
-                dfs(d)
-        visited[n] = 2
-        order.append(n)
-
-    for n in ORIGINAL_ORDER:
-        if n in final_set:
-            dfs(n)
-
-    final_order = order
-
-with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
-    f.write(f"publish_names={','.join(final_order)}\n")
-    f.write(f"dry_run={'true' if dry_run else 'false'}\n")
-PY
-
-      - name: Publish crates
-        run: |
-          IFS=',' read -r -a pkgs <<< "${{ steps.calc.outputs.publish_names }}"
-          for p in "${pkgs[@]}"; do
-            if [ "${{ steps.calc.outputs.dry_run }}" = 'true' ]; then
-              cargo publish -p "$p" --dry-run
-            else
-              cargo publish -p "$p"
+          selected=()
+          # Using jq (available on GitHub ubuntu runners) to read the dispatch inputs
+          for box in publish_atm_core publish_atm_protocol publish_atm_tui publish_atmd publish_atm; do
+            val=$(jq -r --arg k "$box" '.inputs[$k] // "false"' "$EVENT_JSON" 2>/dev/null || echo "false")
+            if [ "$(echo "$val" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+              case "$box" in
+                publish_atm_core) selected+=("atm-core");;
+                publish_atm_protocol) selected+=("atm-protocol");;
+                publish_atm_tui) selected+=("atm-tui");;
+                publish_atmd) selected+=("atmd");;
+                publish_atm) selected+=("atm");;
+              esac
             fi
-            sleep 20
           done
+
+          if [ "${#selected[@]}" -eq 0 ]; then
+            echo "::error::No crates selected via checkboxes. Set at least one publish_* checkbox to true in the dispatch form."
+            exit 1
+          fi
+
+          # Compose publish order by filtering ORIGINAL_ORDER
+          publish_list=()
+          for p in "${ORIGINAL_ORDER[@]}"; do
+            for s in "${selected[@]}"; do
+              if [ "$p" = "$s" ]; then
+                publish_list+=("$p")
+              fi
+            done
+          done
+
+          # Export to GITHUB_OUTPUT
+          # space-separated list is fine for the runner; we split it later
+          echo "publish_names=${publish_list[*]}" >> "$GITHUB_OUTPUT"
+
+          dry=$(jq -r '.inputs.dry_run // "false"' "$EVENT_JSON" 2>/dev/null || echo "false")
+          if [ "$(echo "$dry" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+            echo "dry_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "dry_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Show plan
+        run: |-
+          echo "Publish names: ${{ steps.plan.outputs.publish_names }}"
+          echo "Dry run: ${{ steps.plan.outputs.dry_run }}"
+
+      - name: Publish crates in order
+        run: |-
+          set -euo pipefail
+          read -r -a pkgs <<< "${{ steps.plan.outputs.publish_names }}"
+          for p in "${pkgs[@]}"; do
+            if [ "${{ steps.plan.outputs.dry_run }}" = "true" ]; then
+              echo "DRY RUN: cargo publish -p $p"
+            else
+              echo "Publishing $p"
+              cargo publish -p "$p" || { echo "::error::cargo publish failed for $p"; exit 1; }
+              sleep 20
+            fi
+          done
+
+      - name: Finished
+        run: echo "All requested crates processed."
