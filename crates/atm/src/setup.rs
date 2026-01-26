@@ -12,7 +12,7 @@ use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
 /// The atm-hook script content, embedded at compile time.
-const ATM_HOOK_SCRIPT: &str = include_str!("../../../scripts/atm-hook");
+const ATM_HOOK_SCRIPT: &str = include_str!("../scripts/atm-hook");
 
 /// All valid Claude Code hook types.
 /// See: https://docs.anthropic.com/en/docs/claude-code/hooks

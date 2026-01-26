@@ -59,7 +59,7 @@ jobs:
           mkdir "$DIRNAME"
           cp target/${{ matrix.target }}/release/atm "$DIRNAME/"
           cp target/${{ matrix.target }}/release/atmd "$DIRNAME/"
-          cp scripts/atm-hook "$DIRNAME/"
+          cp crates/atm/scripts/atm-hook "$DIRNAME/"
           chmod +x "$DIRNAME"/*
           tar -czvf "atm-${{ matrix.target }}.tar.gz" "$DIRNAME"
 
