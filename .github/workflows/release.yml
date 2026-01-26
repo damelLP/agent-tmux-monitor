@@ -6,8 +6,46 @@ on:
   workflow_dispatch:
     inputs:
       publish_crates:
-        description: 'Publish to crates.io'
+        description: 'Publish to crates.io (set true to run the publish job)'
         required: true
+        type: boolean
+        default: false
+
+      # Simple per-crate checkboxes (select/deselect)
+      publish_atm_core:
+        description: 'Publish crate: atm-core'
+        required: false
+        type: boolean
+        default: true
+      publish_atm_protocol:
+        description: 'Publish crate: atm-protocol'
+        required: false
+        type: boolean
+        default: true
+      publish_atm_tui:
+        description: 'Publish crate: atm-tui'
+        required: false
+        type: boolean
+        default: true
+      publish_atmd:
+        description: 'Publish crate: atmd'
+        required: false
+        type: boolean
+        default: true
+      publish_atm:
+        description: 'Publish crate: atm (root)'
+        required: false
+        type: boolean
+        default: true
+
+      include_deps:
+        description: 'If true, include workspace dependencies of the selected crates (transitively). Default true.'
+        required: false
+        type: boolean
+        default: true
+      dry_run:
+        description: 'Run cargo publish --dry-run (true/false). Default false.'
+        required: false
         type: boolean
         default: false
 
@@ -46,7 +84,7 @@ jobs:
         run: cargo install cross --git https://github.com/cross-rs/cross
 
       - name: Build
-        run: |
+        run: |-
           if [ "${{ matrix.cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
           else
@@ -54,7 +92,7 @@ jobs:
           fi
 
       - name: Package
-        run: |
+        run: |-
           DIRNAME="atm-${{ github.ref_name }}"
           mkdir "$DIRNAME"
           cp target/${{ matrix.target }}/release/atm "$DIRNAME/"
@@ -96,7 +134,10 @@ jobs:
     name: Publish to crates.io
     runs-on: ubuntu-latest
     # Only run on manual trigger with publish_crates=true
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_crates
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_crates == 'true'
+
+    env:
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
     steps:
       - name: Checkout
@@ -108,32 +149,195 @@ jobs:
       - name: Verify crate builds
         run: cargo build --release
 
-      - name: Publish crates in dependency order
+      - name: Calculate publish order (respect original manual order)
+        id: calc
+        run: |-
+          set -euo pipefail
+          python3 - <<'PY'
+import os, subprocess, json, sys
+
+# Original manual order from your old workflow. We'll filter this by selected checkboxes.
+ORIGINAL_ORDER = [
+    'atm-core',
+    'atm-protocol',
+    'atm-tui',
+    'atmd',
+    'atm',
+]
+
+checkbox_map = {
+    'publish_atm_core': 'atm-core',
+    'publish_atm_protocol': 'atm-protocol',
+    'publish_atm_tui': 'atm-tui',
+    'publish_atmd': 'atmd',
+    'publish_atm': 'atm',
+}
+
+# Read checkbox inputs (try common GH Actions env locations)
+selected = set()
+for box, name in checkbox_map.items():
+    val = os.environ.get('GITHUB_EVENT_INPUTS_' + box.upper()) or os.environ.get('INPUT_' + box) or os.environ.get(box)
+    if val is None:
+        # attempt reading event JSON
+        try:
+            with open(os.environ['GITHUB_EVENT_PATH']) as f:
+                ev = json.load(f)
+            val = ev.get('inputs', {}).get(box)
+        except Exception:
+            val = None
+    if isinstance(val, bool):
+        truth = val
+    elif isinstance(val, str):
+        truth = val.lower() in ('1','true','yes')
+    else:
+        truth = False
+    if truth:
+        selected.add(name)
+
+include_deps = os.environ.get('INPUT_INCLUDE_DEPS','true').lower() in ('1','true','yes')
+
+dry_run = os.environ.get('INPUT_DRY_RUN','false').lower() in ('1','true','yes')
+
+if not selected:
+    print('::error::No crates selected via checkboxes. Set at least one publish_* checkbox to true in the dispatch form.')
+    sys.exit(1)
+
+# If include_deps is false: publish only the selected crates, in the ORIGINAL_ORDER sequence.
+if not include_deps:
+    final_order = [p for p in ORIGINAL_ORDER if p in selected]
+else:
+    # If include_deps is true: expand selection to include workspace deps, but keep ORIGINAL_ORDER as a stable tie-breaker.
+    def cargo_metadata():
+        out = subprocess.check_output(["cargo","metadata","--format-version=1"], text=True)
+        return json.loads(out)
+
+    meta = cargo_metadata()
+    workspace_ids = set(meta.get('workspace_members', []))
+    id_to_name = {p['id']: p['name'] for p in meta['packages']}
+    workspace_names = { id_to_name[i] for i in workspace_ids }
+
+    # Build workspace dependency map
+    pkg_deps = {}
+    for p in meta['packages']:
+        if p['id'] not in workspace_ids:
+            continue
+        deps = set()
+        for d in p.get('dependencies', []):
+            if d['name'] in workspace_names:
+                deps.add(d['name'])
+        pkg_deps[p['name']] = deps
+
+    # Expand transitively
+    final_set = set(selected)
+    stack = list(selected)
+    while stack:
+        cur = stack.pop()
+        for d in pkg_deps.get(cur, ()): 
+            if d not in final_set:
+                final_set.add(d)
+                stack.append(d)
+
+    # Topo sort with ORIGINAL_ORDER used as stable tie-breaker for nodes with no dependency relation between them
+    visited = {}
+    order = []
+    def dfs(n):
+        if visited.get(n,0)==1:
+            raise RuntimeError('cycle detected')
+        if visited.get(n,0)==2:
+            return
+        visited[n]=1
+        for d in sorted(pkg_deps.get(n,()), key=lambda x: ORIGINAL_ORDER.index(x) if x in ORIGINAL_ORDER else 999):
+            if d in final_set:
+                dfs(d)
+        visited[n]=2
+        order.append(n)
+
+    # Start DFS using ORIGINAL_ORDER to get a stable result
+    for n in [p for p in ORIGINAL_ORDER if p in final_set] + sorted(final_set - set(ORIGINAL_ORDER)):
+        if visited.get(n,0)==0:
+            dfs(n)
+
+    # reverse order to have deps before dependents
+    final_order = order
+
+# Compose publish order string
+publish_names = ','.join(final_order)
+print('Selected (initial): ' + ','.join(sorted(selected)))
+print('Include deps: ' + str(include_deps))
+print('Final publish order: ' + publish_names)
+
+# Export outputs
+gout = os.environ.get('GITHUB_OUTPUT') or '/tmp/gout'
+with open(gout,'a') as f:
+    f.write(f'publish_names={publish_names}
+')
+    f.write(f'dry_run={'true' if dry_run else 'false'}
+')
+PY
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -e
-          echo "Publishing atm-core..."
-          cargo publish -p atm-core
+          INPUT_INCLUDE_DEPS: ${{ github.event.inputs.include_deps }}
+          INPUT_DRY_RUN: ${{ github.event.inputs.dry_run }}
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+      - name: Show plan
+        run: |-
+          echo "Publish names: ${{ steps.calc.outputs.publish_names }}"
+          echo "Dry run: ${{ steps.calc.outputs.dry_run }}"
 
-          echo "Publishing atm-protocol..."
-          cargo publish -p atm-protocol
+      - name: Publish crates in computed order
+        run: |-
+          set -euo pipefail
+          publish_names="${{ steps.calc.outputs.publish_names || '' }}"
+          dry_run="${{ steps.calc.outputs.dry_run || 'false' }}"
+          if [ -z "$publish_names" ]; then
+            echo "::error::No publish names computed; aborting."
+            exit 1
+          fi
+          IFS=',' read -r -a arr <<< "$publish_names"
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+          # Keep the original workflow's parallelism for atm-tui + atmd: if both present, run them in background.
+          for pkg in "${arr[@]}"; do
+            if [ "$pkg" = "atm-tui" ] || [ "$pkg" = "atmd" ]; then
+              # collect for potential parallel run
+              parallel_list+=("$pkg")
+              continue
+            fi
+            # before publishing a non-parallelable entry, flush any collected parallel publishes
+            if [ ${#parallel_list[@]} -gt 0 ]; then
+              for p in "${parallel_list[@]}"; do
+                echo "Publishing $p (in parallel)..."
+                if [ "$dry_run" = "true" ]; then
+                  cargo publish -p "$p" --dry-run &
+                else
+                  cargo publish -p "$p" &
+                fi
+              done
+              wait
+              # give crates.io a moment
+              sleep 20
+              parallel_list=()
+            fi
 
-          echo "Publishing atm-tui and atmd in parallel..."
-          cargo publish -p atm-tui &
-          cargo publish -p atmd &
-          wait
+            echo "Publishing $pkg ..."
+            if [ "$dry_run" = "true" ]; then
+              cargo publish -p "$pkg" --dry-run || { echo "::error::cargo publish --dry-run failed for $pkg"; exit 1; }
+            else
+              cargo publish -p "$pkg" || { echo "::error::cargo publish failed for $pkg"; exit 1; }
+            fi
+            sleep 20
+          done
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+          # flush any remaining parallel publishes
+          if [ ${#parallel_list[@]} -gt 0 ]; then
+            for p in "${parallel_list[@]}"; do
+              echo "Publishing $p (in parallel)..."
+              if [ "$dry_run" = "true" ]; then
+                cargo publish -p "$p" --dry-run &
+              else
+                cargo publish -p "$p" &
+              fi
+            done
+            wait
+          fi
 
-          echo "Publishing root atm package..."
-          cargo publish -p atm
-
-          echo "All crates published successfully!"
+      - name: Finished
+        run: echo "All requested crates processed."
