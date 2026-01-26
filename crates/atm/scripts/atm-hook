@@ -34,6 +34,7 @@ if [ -z "$input" ]; then
 fi
 
 log_debug "Received: ${input:0:200}..."
+log_debug "PID info: PPID=$PPID, $$=$$, parent_comm=$(cat /proc/$PPID/comm 2>/dev/null || echo 'unknown')"
 
 # Detect hook type from input
 # StatusLine events don't have hook_event_name, they have different structure
