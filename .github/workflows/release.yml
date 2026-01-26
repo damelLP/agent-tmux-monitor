@@ -113,27 +113,106 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           set -e
-          echo "Publishing atm-core..."
-          cargo publish -p atm-core
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+          # Get crate version from workspace (fails if crate not found)
+          get_version() {
+            local version
+            version=$(cargo metadata --format-version 1 --no-deps | jq -r ".packages[] | select(.name == \"$1\") | .version")
+            if [ -z "$version" ]; then
+              echo "::error::Crate '$1' not found in workspace" >&2
+              return 1
+            fi
+            echo "$version"
+          }
 
-          echo "Publishing atm-protocol..."
-          cargo publish -p atm-protocol
+          # Check if crate@version is already on crates.io
+          is_published() {
+            local crate=$1
+            local version=$2
+            # Use crates.io API - more reliable than cargo search (30s timeout)
+            local status=$(curl -s --max-time 30 -o /dev/null -w "%{http_code}" "https://crates.io/api/v1/crates/$crate/$version")
+            [ "$status" = "200" ]
+          }
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+          # Publish a crate, skipping if already published
+          publish_crate() {
+            local crate=$1
+            local version=$(get_version "$crate")
 
-          echo "Publishing atm-tui and atmd in parallel..."
-          cargo publish -p atm-tui &
-          cargo publish -p atmd &
-          wait
+            echo "::group::$crate@$version"
 
-          echo "Waiting for crates.io index update..."
-          sleep 30
+            if is_published "$crate" "$version"; then
+              echo "✓ Already published, skipping"
+              echo "::endgroup::"
+              return 0
+            fi
 
-          echo "Publishing root atm package..."
-          cargo publish -p atm
+            echo "Publishing..."
+            if cargo publish -p "$crate" 2>&1; then
+              echo "✓ Published successfully"
+              echo "::endgroup::"
+              return 0
+            fi
 
-          echo "All crates published successfully!"
+            # Double-check: maybe it was published despite error (race condition)
+            sleep 5
+            if is_published "$crate" "$version"; then
+              echo "✓ Published (confirmed after retry)"
+              echo "::endgroup::"
+              return 0
+            fi
+
+            echo "✗ Failed to publish"
+            echo "::endgroup::"
+            return 1
+          }
+
+          # Wait for crate to appear in index (needed for dependents)
+          wait_for_crate() {
+            local crate=$1
+            local version=$(get_version "$crate")
+            local max_wait=120
+            local waited=0
+
+            echo -n "Waiting for $crate@$version in index"
+            while [ "$waited" -lt "$max_wait" ]; do
+              if is_published "$crate" "$version"; then
+                echo " ✓"
+                return 0
+              fi
+              echo -n "."
+              sleep 5
+              waited=$((waited + 5))
+            done
+            echo " timeout"
+            echo "::error::Timeout waiting for $crate@$version in crates.io index"
+            return 1
+          }
+
+          # Publish in dependency order
+          # Layer 1: No dependencies
+          publish_crate atm-core || exit 1
+          wait_for_crate atm-core || exit 1
+
+          # Layer 2: Depends on atm-core
+          publish_crate atm-protocol || exit 1
+          wait_for_crate atm-protocol || exit 1
+
+          # Layer 3: Depends on atm-core and atm-protocol (can run in parallel)
+          publish_crate atm-tui &
+          pid_tui=$!
+          publish_crate atmd &
+          pid_atmd=$!
+
+          # Wait for both and check results
+          wait $pid_tui || exit 1
+          wait $pid_atmd || exit 1
+
+          wait_for_crate atm-tui || exit 1
+          wait_for_crate atmd || exit 1
+
+          # Layer 4: Depends on all above
+          publish_crate atm || exit 1
+
+          echo ""
+          echo "🎉 All crates published successfully!"
