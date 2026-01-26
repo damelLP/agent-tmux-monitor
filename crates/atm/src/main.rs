@@ -418,10 +418,10 @@ async fn main() -> Result<()> {
     // Handle subcommands first (before TUI initialization)
     match args.command {
         Some(Command::Setup) => {
-            return setup::setup().map_err(Into::into);
+            return setup::setup();
         }
         Some(Command::Uninstall) => {
-            return setup::uninstall().map_err(Into::into);
+            return setup::uninstall();
         }
         None => {
             // Continue with normal TUI operation
@@ -468,7 +468,7 @@ async fn main() -> Result<()> {
 
     // 1.6. Ensure daemon is running (start it if not)
     if let Err(e) = daemon::ensure_daemon_running() {
-        bail!("Failed to ensure daemon is running: {}", e);
+        bail!("Failed to ensure daemon is running: {e}");
     }
 
     // 2. Create event channel for communication between tasks

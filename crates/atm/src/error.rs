@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn test_terminal_init_error_display() {
         let error = TuiError::TerminalInit("not a TTY".to_string());
-        let display = format!("{}", error);
+        let display = format!("{error}");
         assert!(display.contains("Failed to initialize terminal"));
         assert!(display.contains("not a TTY"));
     }
@@ -136,7 +136,7 @@ mod tests {
     #[test]
     fn test_terminal_cleanup_error_display() {
         let error = TuiError::TerminalCleanup("could not restore cursor".to_string());
-        let display = format!("{}", error);
+        let display = format!("{error}");
         assert!(display.contains("Failed to restore terminal"));
         assert!(display.contains("could not restore cursor"));
     }
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn test_daemon_connection_error_display() {
         let error = TuiError::DaemonConnection("refused".to_string());
-        let display = format!("{}", error);
+        let display = format!("{error}");
         assert!(display.contains("Failed to connect to daemon"));
         assert!(display.contains("refused"));
     }
@@ -155,7 +155,7 @@ mod tests {
             client_version: "1.0.0".to_string(),
             daemon_version: "2.0.0".to_string(),
         };
-        let display = format!("{}", error);
+        let display = format!("{error}");
         assert!(display.contains("Protocol version mismatch"));
         assert!(display.contains("client: 1.0.0"));
         assert!(display.contains("daemon: 2.0.0"));
@@ -164,7 +164,7 @@ mod tests {
     #[test]
     fn test_protocol_error_display() {
         let error = TuiError::ProtocolError("invalid message type".to_string());
-        let display = format!("{}", error);
+        let display = format!("{error}");
         assert!(display.contains("Protocol error"));
         assert!(display.contains("invalid message type"));
     }
@@ -174,7 +174,7 @@ mod tests {
         let io_error = io::Error::new(io::ErrorKind::NotFound, "socket not found");
         let tui_error: TuiError = io_error.into();
         assert!(matches!(tui_error, TuiError::Io(_)));
-        let display = format!("{}", tui_error);
+        let display = format!("{tui_error}");
         assert!(display.contains("IO error"));
     }
 
@@ -186,7 +186,7 @@ mod tests {
         let json_error = parse_result.unwrap_err();
         let tui_error: TuiError = json_error.into();
         assert!(matches!(tui_error, TuiError::ParseError(_)));
-        let display = format!("{}", tui_error);
+        let display = format!("{tui_error}");
         assert!(display.contains("Failed to parse message"));
     }
 
@@ -194,7 +194,7 @@ mod tests {
     fn test_error_debug_impl() {
         let error = TuiError::DaemonConnection("test".to_string());
         // Debug impl should not panic
-        let debug = format!("{:?}", error);
+        let debug = format!("{error:?}");
         assert!(debug.contains("DaemonConnection"));
     }
 

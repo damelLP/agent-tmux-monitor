@@ -233,11 +233,11 @@ pub fn setup() -> Result<()> {
             .context("hook type is not an array")?;
 
         if has_atm_hook(hooks_array) {
-            println!("  {} - already configured", hook_type);
+            println!("  {hook_type} - already configured");
         } else {
             hooks_array.push(create_hook_entry(hook_type));
             added += 1;
-            println!("  {} - added", hook_type);
+            println!("  {hook_type} - added");
         }
     }
 
@@ -290,7 +290,7 @@ pub fn uninstall() -> Result<()> {
 
                 if before != after {
                     removed += before - after;
-                    println!("  {} - removed", hook_type);
+                    println!("  {hook_type} - removed");
                 }
 
                 // Remove empty arrays

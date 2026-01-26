@@ -96,7 +96,7 @@ fn remove_pid_file() {
 }
 
 fn is_process_running(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{}", pid)).exists()
+    PathBuf::from(format!("/proc/{pid}")).exists()
 }
 
 fn is_daemon_running() -> Option<u32> {
@@ -114,7 +114,7 @@ fn stop_daemon(pid: u32) -> Result<()> {
     {
         let result = unsafe { libc::kill(pid as i32, libc::SIGTERM) };
         if result != 0 {
-            bail!("Failed to send SIGTERM to process {}", pid);
+            bail!("Failed to send SIGTERM to process {pid}");
         }
     }
     #[cfg(not(unix))]
@@ -132,7 +132,7 @@ fn main() -> Result<()> {
     match command {
         Command::Start { daemon } => {
             if let Some(pid) = is_daemon_running() {
-                eprintln!("Daemon is already running (PID {})", pid);
+                eprintln!("Daemon is already running (PID {pid})");
                 eprintln!("Use 'atmd stop' to stop it first.");
                 process::exit(1);
             }
@@ -151,7 +151,7 @@ fn main() -> Result<()> {
         }
         Command::Stop => {
             if let Some(pid) = is_daemon_running() {
-                println!("Stopping daemon (PID {})...", pid);
+                println!("Stopping daemon (PID {pid})...");
                 stop_daemon(pid)?;
 
                 for _ in 0..50 {
@@ -171,12 +171,12 @@ fn main() -> Result<()> {
         }
         Command::Status => {
             if let Some(pid) = is_daemon_running() {
-                println!("Daemon is running (PID {})", pid);
+                println!("Daemon is running (PID {pid})");
 
                 let socket_path = env::var("ATM_SOCKET")
                     .unwrap_or_else(|_| DEFAULT_SOCKET_PATH.to_string());
                 if PathBuf::from(&socket_path).exists() {
-                    println!("Socket: {}", socket_path);
+                    println!("Socket: {socket_path}");
                 }
 
                 Ok(())

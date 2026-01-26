@@ -31,7 +31,7 @@ fn read_pid() -> Option<u32> {
 
 /// Checks if a process with the given PID is running.
 fn is_process_running(pid: u32) -> bool {
-    PathBuf::from(format!("/proc/{}", pid)).exists()
+    PathBuf::from(format!("/proc/{pid}")).exists()
 }
 
 /// Checks if the daemon is currently running.
@@ -82,7 +82,7 @@ pub fn ensure_daemon_running() -> Result<(), String> {
 
     // Start the daemon
     if let Err(e) = spawn_daemon() {
-        return Err(format!("Failed to start daemon: {}", e));
+        return Err(format!("Failed to start daemon: {e}"));
     }
 
     // Wait for daemon to be ready (up to 3 seconds)

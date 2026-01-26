@@ -952,7 +952,7 @@ mod tests {
 
         // Register multiple sessions
         for i in 0..3 {
-            let session = create_test_session(&format!("test-{}", i));
+            let session = create_test_session(&format!("test-{i}"));
             let (tx, _) = oneshot::channel();
             actor.handle_command(RegistryCommand::Register {
                 session: Box::new(session),
@@ -1128,7 +1128,7 @@ mod tests {
 
         // Register MAX_SESSIONS sessions
         for i in 0..MAX_SESSIONS {
-            let session = create_test_session(&format!("test-{}", i));
+            let session = create_test_session(&format!("test-{i}"));
             let (tx, _) = oneshot::channel();
             actor.handle_command(RegistryCommand::Register {
                 session: Box::new(session),

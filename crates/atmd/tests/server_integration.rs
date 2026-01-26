@@ -72,8 +72,7 @@ impl TestServer {
         // Fail fast if socket didn't appear
         assert!(
             socket_path.exists(),
-            "Server socket did not appear within {:?}",
-            SOCKET_WAIT_TIMEOUT
+            "Server socket did not appear within {SOCKET_WAIT_TIMEOUT:?}"
         );
 
         let test_server = TestServer {
@@ -146,7 +145,7 @@ impl TestClient {
 
         match self.recv().await {
             DaemonMessage::Connected { client_id, .. } => client_id,
-            other => panic!("Expected Connected, got {:?}", other),
+            other => panic!("Expected Connected, got {other:?}"),
         }
     }
 
@@ -199,7 +198,7 @@ async fn test_handshake_success() {
             assert_eq!(protocol_version, ProtocolVersion::CURRENT);
             assert_eq!(client_id, "test-client");
         }
-        other => panic!("Expected Connected, got {:?}", other),
+        other => panic!("Expected Connected, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -218,11 +217,10 @@ async fn test_handshake_auto_assigns_client_id() {
         DaemonMessage::Connected { client_id, .. } => {
             assert!(
                 client_id.starts_with("client-"),
-                "Expected auto-assigned ID starting with 'client-', got: {}",
-                client_id
+                "Expected auto-assigned ID starting with 'client-', got: {client_id}"
             );
         }
-        other => panic!("Expected Connected, got {:?}", other),
+        other => panic!("Expected Connected, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -243,11 +241,10 @@ async fn test_handshake_version_mismatch() {
         DaemonMessage::Rejected { reason, .. } => {
             assert!(
                 reason.contains("not compatible"),
-                "Expected 'not compatible' in reason, got: {}",
-                reason
+                "Expected 'not compatible' in reason, got: {reason}"
             );
         }
-        other => panic!("Expected Rejected, got {:?}", other),
+        other => panic!("Expected Rejected, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -273,7 +270,7 @@ async fn test_subscribe_unsubscribe_flow() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 0, "Initial session list should be empty");
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     // Unsubscribe
@@ -283,7 +280,7 @@ async fn test_subscribe_unsubscribe_flow() {
     client.send(ClientMessage::list_sessions()).await;
     match client.recv().await {
         DaemonMessage::SessionList { .. } => {}
-        other => panic!("Expected SessionList after unsubscribe, got {:?}", other),
+        other => panic!("Expected SessionList after unsubscribe, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -305,7 +302,7 @@ async fn test_subscribe_with_session_filter() {
     // Should receive session list
     match client.recv().await {
         DaemonMessage::SessionList { .. } => {}
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -343,7 +340,7 @@ async fn test_broadcast_respects_filter() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 0, "Initial session list should be empty");
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     // Client 2: subscribes to all sessions
@@ -356,7 +353,7 @@ async fn test_broadcast_respects_filter() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 0, "Initial session list should be empty");
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     // Register sessions via registry
@@ -378,7 +375,7 @@ async fn test_broadcast_respects_filter() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 2, "Should have 2 sessions registered");
         }
-        other => panic!("Expected SessionList with 2 sessions, got {:?}", other),
+        other => panic!("Expected SessionList with 2 sessions, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -400,7 +397,7 @@ async fn test_max_clients_rejection() {
     for i in 0..MAX_TUI_CLIENTS {
         let mut client = server.connect().await;
         client
-            .handshake(Some(format!("client-{}", i)))
+            .handshake(Some(format!("client-{i}")))
             .await;
         client.send(ClientMessage::subscribe(None)).await;
         let _ = client.recv().await; // drain session list
@@ -423,7 +420,7 @@ async fn test_max_clients_rejection() {
             DaemonMessage::Pong { seq } => {
                 assert_eq!(seq, i as u64);
             }
-            other => panic!("Expected Pong for client {}, got {:?}", i, other),
+            other => panic!("Expected Pong for client {i}, got {other:?}"),
         }
     }
 
@@ -492,7 +489,7 @@ async fn test_ping_pong() {
         DaemonMessage::Pong { seq } => {
             assert_eq!(seq, 42, "Pong seq should match ping seq");
         }
-        other => panic!("Expected Pong, got {:?}", other),
+        other => panic!("Expected Pong, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -514,7 +511,7 @@ async fn test_list_sessions_command() {
             // Initially empty
             assert_eq!(sessions.len(), 0);
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -537,11 +534,10 @@ async fn test_wrong_message_before_handshake() {
         DaemonMessage::Error { message, .. } => {
             assert!(
                 message.contains("Expected Connect"),
-                "Error should mention expected Connect message, got: {}",
-                message
+                "Error should mention expected Connect message, got: {message}"
             );
         }
-        other => panic!("Expected Error, got {:?}", other),
+        other => panic!("Expected Error, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -562,11 +558,10 @@ async fn test_duplicate_connect_rejected() {
         DaemonMessage::Error { message, .. } => {
             assert!(
                 message.contains("Already connected"),
-                "Error should mention 'Already connected', got: {}",
-                message
+                "Error should mention 'Already connected', got: {message}"
             );
         }
-        other => panic!("Expected Error, got {:?}", other),
+        other => panic!("Expected Error, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -588,8 +583,8 @@ async fn test_multiple_clients_concurrent() {
             let stream = UnixStream::connect(&socket_path).await.unwrap();
             let mut client = TestClient::new(stream);
 
-            let id = client.handshake(Some(format!("concurrent-{}", i))).await;
-            assert_eq!(id, format!("concurrent-{}", i));
+            let id = client.handshake(Some(format!("concurrent-{i}"))).await;
+            assert_eq!(id, format!("concurrent-{i}"));
 
             // Send list request
             client.send(ClientMessage::list_sessions()).await;
@@ -614,7 +609,7 @@ async fn test_concurrent_ping_pong() {
     let mut clients = Vec::new();
     for i in 0..3 {
         let mut client = server.connect().await;
-        client.handshake(Some(format!("ping-client-{}", i))).await;
+        client.handshake(Some(format!("ping-client-{i}"))).await;
         clients.push(client);
     }
 
@@ -629,7 +624,7 @@ async fn test_concurrent_ping_pong() {
             DaemonMessage::Pong { seq } => {
                 assert_eq!(seq, (i * 100) as u64);
             }
-            other => panic!("Expected Pong for client {}, got {:?}", i, other),
+            other => panic!("Expected Pong for client {i}, got {other:?}"),
         }
     }
 

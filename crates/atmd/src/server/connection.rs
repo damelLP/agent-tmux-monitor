@@ -413,9 +413,14 @@ impl ConnectionHandler {
         );
 
         // Get event type
-        let event_type = raw_event
-            .event_type()
-            .ok_or_else(|| ConnectionError::ParseError("Unknown hook event type".to_string()))?;
+        let event_type = raw_event.event_type().ok_or_else(|| {
+            ConnectionError::ParseError(format!(
+                "Unknown hook event type: '{}' (session_id={}, tool_name={:?})",
+                raw_event.hook_event_name,
+                raw_event.session_id,
+                raw_event.tool_name
+            ))
+        })?;
 
         // Apply to registry (including PID and tmux_pane for process lifecycle tracking)
         self.registry

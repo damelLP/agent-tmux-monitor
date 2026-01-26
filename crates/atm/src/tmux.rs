@@ -105,15 +105,14 @@ pub fn jump_to_pane(pane_id: &str) -> Result<(), TmuxError> {
         .lines()
         .find(|line| line.starts_with(pane_id))
         .ok_or_else(|| {
-            TmuxError::CommandFailed(format!("pane {} not found in any session", pane_id))
+            TmuxError::CommandFailed(format!("pane {pane_id} not found in any session"))
         })?;
 
     // Parse: "%5 session_name @3"
     let parts: Vec<&str> = pane_info.split_whitespace().collect();
     if parts.len() < 3 {
         return Err(TmuxError::CommandFailed(format!(
-            "unexpected pane info format: {}",
-            pane_info
+            "unexpected pane info format: {pane_info}"
         )));
     }
     let session_name = parts[1];

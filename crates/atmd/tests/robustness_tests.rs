@@ -140,7 +140,7 @@ impl TestClient {
         self.send(ClientMessage::connect(client_id)).await;
         match self.recv().await {
             DaemonMessage::Connected { client_id, .. } => client_id,
-            other => panic!("Expected Connected, got {:?}", other),
+            other => panic!("Expected Connected, got {other:?}"),
         }
     }
 }
@@ -250,8 +250,7 @@ async fn test_oversized_message_rejected() {
     // Create a message larger than MAX_MESSAGE_SIZE (1MB)
     let large_data = "x".repeat(2 * 1024 * 1024); // 2MB
     let large_json = format!(
-        r#"{{"protocol_version":{{"major":1,"minor":0}},"message":{{"type":"status_update","data":{{"padding":"{}"}}}}}}"#,
-        large_data
+        r#"{{"protocol_version":{{"major":1,"minor":0}},"message":{{"type":"status_update","data":{{"padding":"{large_data}"}}}}}}"#
     );
 
     client.send_raw(large_json.as_bytes()).await;
@@ -279,7 +278,7 @@ async fn test_rapid_connect_disconnect() {
     // Rapidly connect and disconnect 20 times
     for i in 0..20 {
         let mut client = server.connect().await;
-        client.handshake(Some(format!("rapid-{}", i))).await;
+        client.handshake(Some(format!("rapid-{i}"))).await;
         client.send(ClientMessage::disconnect()).await;
         // Don't wait, just move on
     }
@@ -306,8 +305,8 @@ async fn test_many_concurrent_connections() {
         let handle = tokio::spawn(async move {
             let stream = UnixStream::connect(&socket_path).await.unwrap();
             let mut client = TestClient::new(stream);
-            let id = client.handshake(Some(format!("concurrent-{}", i))).await;
-            assert_eq!(id, format!("concurrent-{}", i));
+            let id = client.handshake(Some(format!("concurrent-{i}"))).await;
+            assert_eq!(id, format!("concurrent-{i}"));
 
             // Do some operations
             client.send(ClientMessage::list_sessions()).await;
@@ -316,7 +315,7 @@ async fn test_many_concurrent_connections() {
             client.send(ClientMessage::ping(i as u64)).await;
             match client.recv().await {
                 DaemonMessage::Pong { seq } => assert_eq!(seq, i as u64),
-                other => panic!("Expected Pong, got {:?}", other),
+                other => panic!("Expected Pong, got {other:?}"),
             }
         });
         handles.push(handle);
@@ -372,7 +371,7 @@ async fn test_rapid_status_updates() {
             // Last update should be reflected
             assert!(sessions[0].cost_usd > 0.4, "Cost should reflect updates");
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -416,7 +415,7 @@ async fn test_multiple_sessions_rapid_updates() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 10, "Should have 10 sessions");
         }
-        other => panic!("Expected SessionList, got {:?}", other),
+        other => panic!("Expected SessionList, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -447,14 +446,14 @@ async fn test_client_continues_after_error() {
     // Should receive error
     match client.recv().await {
         DaemonMessage::Error { .. } => {}
-        other => panic!("Expected Error, got {:?}", other),
+        other => panic!("Expected Error, got {other:?}"),
     }
 
     // Client should still be able to send valid messages
     client.send(ClientMessage::ping(42)).await;
     match client.recv().await {
         DaemonMessage::Pong { seq } => assert_eq!(seq, 42),
-        other => panic!("Expected Pong after error, got {:?}", other),
+        other => panic!("Expected Pong after error, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -484,7 +483,7 @@ async fn test_multiple_errors_dont_break_connection() {
     client.send(ClientMessage::list_sessions()).await;
     match client.recv().await {
         DaemonMessage::SessionList { .. } => {}
-        other => panic!("Expected SessionList after errors, got {:?}", other),
+        other => panic!("Expected SessionList after errors, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -508,7 +507,7 @@ async fn test_subscriber_receives_session_updates() {
         DaemonMessage::SessionList { sessions } => {
             assert_eq!(sessions.len(), 0);
         }
-        other => panic!("Expected initial SessionList, got {:?}", other),
+        other => panic!("Expected initial SessionList, got {other:?}"),
     }
 
     // Client 2: status updater
@@ -541,7 +540,7 @@ async fn test_subscriber_receives_session_updates() {
         DaemonMessage::SessionUpdated { session } => {
             assert_eq!(session.id.as_str(), "broadcast-test-session");
         }
-        other => panic!("Expected SessionUpdated, got {:?}", other),
+        other => panic!("Expected SessionUpdated, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -565,7 +564,7 @@ async fn test_subscribe_before_sessions_exist() {
         DaemonMessage::SessionList { sessions } => {
             assert!(sessions.is_empty(), "Should be empty initially");
         }
-        other => panic!("Expected empty SessionList, got {:?}", other),
+        other => panic!("Expected empty SessionList, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -585,7 +584,7 @@ async fn test_unsubscribe_when_not_subscribed() {
     client.send(ClientMessage::ping(1)).await;
     match client.recv().await {
         DaemonMessage::Pong { seq } => assert_eq!(seq, 1),
-        other => panic!("Expected Pong, got {:?}", other),
+        other => panic!("Expected Pong, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -605,7 +604,7 @@ async fn test_double_subscribe() {
     client.send(ClientMessage::subscribe(None)).await;
     match client.recv().await {
         DaemonMessage::SessionList { .. } => {}
-        other => panic!("Expected SessionList on re-subscribe, got {:?}", other),
+        other => panic!("Expected SessionList on re-subscribe, got {other:?}"),
     }
 
     server.shutdown().await;
@@ -640,7 +639,7 @@ async fn test_empty_session_id() {
     match client.recv().await {
         DaemonMessage::Pong { seq } => assert_eq!(seq, 99),
         DaemonMessage::Error { .. } => {} // Also acceptable
-        other => panic!("Expected Pong or Error, got {:?}", other),
+        other => panic!("Expected Pong or Error, got {other:?}"),
     }
 
     server.shutdown().await;

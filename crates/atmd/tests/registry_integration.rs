@@ -95,8 +95,7 @@ async fn test_duplicate_registration_fails() {
 
     assert!(
         matches!(result, Err(RegistryError::SessionAlreadyExists(_))),
-        "expected SessionAlreadyExists error, got: {:?}",
-        result
+        "expected SessionAlreadyExists error, got: {result:?}"
     );
 }
 
@@ -110,11 +109,11 @@ async fn test_multiple_sessions() {
 
     // Register 5+ sessions
     for i in 0..7 {
-        let session = create_test_session(&format!("multi-session-{}", i));
+        let session = create_test_session(&format!("multi-session-{i}"));
         handle
             .register(session)
             .await
-            .expect(&format!("session {} should register", i));
+            .unwrap_or_else(|_| panic!("session {i} should register"));
     }
 
     // Query all sessions
@@ -125,9 +124,9 @@ async fn test_multiple_sessions() {
 
     // Verify each session is findable
     for i in 0..7 {
-        let id = SessionId::new(format!("multi-session-{}", i));
+        let id = SessionId::new(format!("multi-session-{i}"));
         let found = handle.get_session(id).await;
-        assert!(found.is_some(), "session {} should be found", i);
+        assert!(found.is_some(), "session {i} should be found");
     }
 }
 
@@ -184,7 +183,7 @@ async fn test_event_subscription_registered() {
             assert_eq!(session_id.as_str(), "event-test");
             assert_eq!(agent_type, AgentType::GeneralPurpose);
         }
-        _ => panic!("expected Registered event, got {:?}", event),
+        _ => panic!("expected Registered event, got {event:?}"),
     }
 }
 
@@ -220,7 +219,7 @@ async fn test_event_subscription_removed() {
                 "expected Explicit removal reason"
             );
         }
-        _ => panic!("expected Removed event, got {:?}", event),
+        _ => panic!("expected Removed event, got {event:?}"),
     }
 }
 
@@ -260,7 +259,7 @@ async fn test_event_subscription_hook_event_update() {
             assert_eq!(session.status, "running");
             assert_eq!(session.status_detail, Some("Bash".to_string()));
         }
-        _ => panic!("expected Updated event, got {:?}", event),
+        _ => panic!("expected Updated event, got {event:?}"),
     }
 }
 
@@ -274,13 +273,11 @@ async fn test_capacity_limit() {
 
     // Register MAX_SESSIONS
     for i in 0..MAX_SESSIONS {
-        let session = create_test_session(&format!("capacity-session-{}", i));
+        let session = create_test_session(&format!("capacity-session-{i}"));
         let result = handle.register(session).await;
         assert!(
             result.is_ok(),
-            "session {} should register, got {:?}",
-            i,
-            result
+            "session {i} should register, got {result:?}"
         );
     }
 
@@ -294,9 +291,7 @@ async fn test_capacity_limit() {
 
     assert!(
         matches!(result, Err(RegistryError::RegistryFull { max: MAX_SESSIONS })),
-        "expected RegistryFull error with max={}, got {:?}",
-        MAX_SESSIONS,
-        result
+        "expected RegistryFull error with max={MAX_SESSIONS}, got {result:?}"
     );
 }
 
@@ -306,7 +301,7 @@ async fn test_capacity_after_removal() {
 
     // Fill to capacity
     for i in 0..MAX_SESSIONS {
-        let session = create_test_session(&format!("cap-remove-{}", i));
+        let session = create_test_session(&format!("cap-remove-{i}"));
         handle.register(session).await.expect("should register");
     }
 
@@ -380,7 +375,7 @@ async fn test_concurrent_registration() {
     for i in 0..10 {
         let h = handle.clone();
         let task = tokio::spawn(async move {
-            let session = create_test_session(&format!("concurrent-{}", i));
+            let session = create_test_session(&format!("concurrent-{i}"));
             h.register(session).await
         });
         handles.push(task);
@@ -395,7 +390,7 @@ async fn test_concurrent_registration() {
 
     // All should succeed
     for (i, result) in results.iter().enumerate() {
-        assert!(result.is_ok(), "registration {} failed: {:?}", i, result);
+        assert!(result.is_ok(), "registration {i} failed: {result:?}");
     }
 
     // Verify all sessions registered
@@ -409,7 +404,7 @@ async fn test_concurrent_queries() {
 
     // Pre-register some sessions
     for i in 0..5 {
-        let session = create_test_session(&format!("query-{}", i));
+        let session = create_test_session(&format!("query-{i}"));
         handle.register(session).await.unwrap();
     }
 
@@ -439,7 +434,7 @@ async fn test_concurrent_mixed_operations() {
 
     // Pre-register some sessions
     for i in 0..3 {
-        let session = create_test_session(&format!("mixed-{}", i));
+        let session = create_test_session(&format!("mixed-{i}"));
         handle.register(session).await.unwrap();
     }
 
@@ -458,7 +453,7 @@ async fn test_concurrent_mixed_operations() {
     // Register new sessions
     for i in 0..3 {
         let h = handle.clone();
-        let id = format!("new-mixed-{}", i);
+        let id = format!("new-mixed-{i}");
         tasks.push(tokio::spawn(async move {
             let session = create_test_session(&id);
             h.register(session).await
@@ -468,7 +463,7 @@ async fn test_concurrent_mixed_operations() {
     // Get specific session tasks
     for i in 0..3 {
         let h = handle.clone();
-        let id = SessionId::new(format!("mixed-{}", i));
+        let id = SessionId::new(format!("mixed-{i}"));
         tasks.push(tokio::spawn(async move {
             let _ = h.get_session(id).await;
             Ok::<_, RegistryError>(())
@@ -484,7 +479,7 @@ async fn test_concurrent_mixed_operations() {
 
     // All should succeed
     for result in results {
-        assert!(result.is_ok(), "operation failed: {:?}", result);
+        assert!(result.is_ok(), "operation failed: {result:?}");
     }
 
     // Final state should have 6 sessions (3 original + 3 new)
@@ -629,11 +624,10 @@ async fn test_hook_event_session_end() {
             assert_eq!(session_id.as_str(), "session-end-test");
             assert!(
                 matches!(reason, RemovalReason::SessionEnded),
-                "expected SessionEnded removal reason, got: {:?}",
-                reason
+                "expected SessionEnded removal reason, got: {reason:?}"
             );
         }
-        _ => panic!("expected Removed event, got {:?}", event),
+        _ => panic!("expected Removed event, got {event:?}"),
     }
 }
 
@@ -671,8 +665,7 @@ async fn test_remove_nonexistent_session() {
 
     assert!(
         matches!(result, Err(RegistryError::SessionNotFound(_))),
-        "expected SessionNotFound error, got {:?}",
-        result
+        "expected SessionNotFound error, got {result:?}"
     );
 }
 
@@ -785,8 +778,7 @@ async fn test_cleanup_stale_is_fire_and_forget() {
     // Should be nearly instant (fire-and-forget)
     assert!(
         elapsed < Duration::from_millis(100),
-        "cleanup_stale took too long: {:?}",
-        elapsed
+        "cleanup_stale took too long: {elapsed:?}"
     );
 }
 

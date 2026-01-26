@@ -297,10 +297,10 @@ async fn main() -> Result<()> {
     // Handle subcommands first (before TUI initialization)
     match args.command {
         Some(Command::Setup) => {
-            return setup::setup().map_err(Into::into);
+            return setup::setup();
         }
         Some(Command::Uninstall) => {
-            return setup::uninstall().map_err(Into::into);
+            return setup::uninstall();
         }
         None => {}
     }
@@ -335,7 +335,7 @@ async fn main() -> Result<()> {
     }
 
     if let Err(e) = daemon::ensure_daemon_running() {
-        bail!("Failed to ensure daemon is running: {}", e);
+        bail!("Failed to ensure daemon is running: {e}");
     }
 
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<Event>();

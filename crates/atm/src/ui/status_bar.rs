@@ -38,9 +38,9 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
         // Format cost
         let cost_str = if total_cost >= 1.0 {
-            format!("${:.2}", total_cost)
+            format!("${total_cost:.2}")
         } else {
-            format!("${:.3}", total_cost)
+            format!("${total_cost:.3}")
         };
 
         // Build stats string
@@ -54,10 +54,10 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
 
         // Add working/attention counts if non-zero
         if working > 0 {
-            stats.push_str(&format!(" | {} working", working));
+            stats.push_str(&format!(" | {working} working"));
         }
         if attention > 0 {
-            stats.push_str(&format!(" | {} need input", attention));
+            stats.push_str(&format!(" | {attention} need input"));
         }
 
         stats

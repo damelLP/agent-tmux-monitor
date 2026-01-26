@@ -120,6 +120,6 @@ mod tests {
     #[test]
     fn test_version_display() {
         let v = ProtocolVersion::new(1, 2);
-        assert_eq!(format!("{}", v), "1.2");
+        assert_eq!(format!("{v}"), "1.2");
     }
 }

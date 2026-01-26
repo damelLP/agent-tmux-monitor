@@ -471,7 +471,7 @@ mod tests {
         let sorted = app.sessions_sorted();
         assert_eq!(sorted.len(), 3);
         // Newest first: session-2, session-3, session-1
-        assert_eq!(sorted.get(0).map(|s| s.id.as_str()), Some("session-2"));
+        assert_eq!(sorted.first().map(|s| s.id.as_str()), Some("session-2"));
         assert_eq!(sorted.get(1).map(|s| s.id.as_str()), Some("session-3"));
         assert_eq!(sorted.get(2).map(|s| s.id.as_str()), Some("session-1"));
     }

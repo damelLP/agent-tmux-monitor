@@ -1209,7 +1209,7 @@ mod tests {
             tool_name: "Bash".to_string(),
             started_at: None,
         };
-        assert_eq!(format!("{}", status), "Running: Bash");
+        assert_eq!(format!("{status}"), "Running: Bash");
     }
 
     #[test]

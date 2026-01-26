@@ -433,7 +433,7 @@ mod tests {
     #[test]
     fn test_action_debug() {
         let action = Action::JumpToSession("session-123".to_string());
-        let debug_str = format!("{:?}", action);
+        let debug_str = format!("{action:?}");
         assert!(debug_str.contains("JumpToSession"));
         assert!(debug_str.contains("session-123"));
     }

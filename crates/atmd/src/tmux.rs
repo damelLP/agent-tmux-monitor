@@ -115,7 +115,7 @@ fn list_tmux_panes() -> Option<HashMap<u32, String>> {
 /// * `Some(ppid)` - The parent process ID
 /// * `None` - If the process doesn't exist or can't be read
 fn get_parent_pid(pid: u32) -> Option<u32> {
-    let stat_path = format!("/proc/{}/stat", pid);
+    let stat_path = format!("/proc/{pid}/stat");
     let stat_content = fs::read_to_string(&stat_path).ok()?;
 
     // Format: pid (comm) state ppid ...
