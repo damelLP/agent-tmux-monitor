@@ -19,6 +19,27 @@ log_debug() {
     fi
 }
 
+# Find the actual Claude process by walking up the process tree.
+# In containerized environments, $PPID may be a transient shell, not Claude.
+# Returns the PID of the last (highest) "claude" process found in the tree.
+find_claude_pid() {
+    local pid=$PPID
+    local claude_pid=""
+    local depth=0
+    local max_depth=15
+
+    while [ "$depth" -lt "$max_depth" ] && [ "$pid" != "1" ] && [ -n "$pid" ]; do
+        local comm
+        comm=$(cat "/proc/$pid/comm" 2>/dev/null) || break
+        log_debug "Tree walk: depth=$depth pid=$pid comm=$comm"
+        [ "$comm" = "claude" ] && claude_pid=$pid
+        pid=$(awk '{print $4}' "/proc/$pid/stat" 2>/dev/null) || break
+        depth=$((depth + 1))
+    done
+
+    echo "${claude_pid:-}"
+}
+
 # Quick check - daemon available?
 if [ ! -S "$SOCKET" ]; then
     log_debug "Socket not found: $SOCKET"
@@ -34,7 +55,14 @@ if [ -z "$input" ]; then
 fi
 
 log_debug "Received: ${input:0:200}..."
-log_debug "PID info: PPID=$PPID, $$=$$, parent_comm=$(cat /proc/$PPID/comm 2>/dev/null || echo 'unknown')"
+
+# Find the actual Claude process PID by walking the process tree
+CLAUDE_PID=$(find_claude_pid)
+if [ -z "$CLAUDE_PID" ]; then
+    log_debug "ERROR: Claude process not found in process tree (started from PPID=$PPID)"
+    exit 0
+fi
+log_debug "Resolved Claude PID: $CLAUDE_PID (walked from PPID=$PPID)"
 
 # Detect hook type from input
 # StatusLine events don't have hook_event_name, they have different structure
@@ -67,13 +95,13 @@ EOF
 # Add PID and tmux pane to the data
 TMUX_PANE_ID="${TMUX_PANE:-}"
 if [ -n "$TMUX_PANE_ID" ]; then
-    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$PPID" --arg tmux_pane "$TMUX_PANE_ID" '{
+    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$CLAUDE_PID" --arg tmux_pane "$TMUX_PANE_ID" '{
         "protocol_version": {"major": 1, "minor": 0},
         "type": $type,
         "data": (. + {pid: $pid, tmux_pane: $tmux_pane})
     }' <<< "$input" 2>/dev/null)
 else
-    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$PPID" '{
+    DATA_MSG=$(jq -c --arg type "$MSG_TYPE" --argjson pid "$CLAUDE_PID" '{
         "protocol_version": {"major": 1, "minor": 0},
         "type": $type,
         "data": (. + {pid: $pid})
