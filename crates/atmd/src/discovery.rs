@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use atm_core::SessionId;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::registry::RegistryHandle;
 use crate::tmux::find_pane_for_pid;
@@ -269,25 +269,90 @@ fn scan_claude_processes() -> Result<Vec<ClaudeProcess>, DiscoveryError> {
     Ok(processes)
 }
 
+/// Checks if a path string represents a Claude executable.
+///
+/// Matches:
+/// - `/path/to/claude` (ends with /claude)
+/// - `claude` (bare command name)
+/// - `~/.local/share/claude/versions/X.Y.Z/...` (versioned installs)
+fn is_claude_path(path: &str) -> bool {
+    path.ends_with("/claude") || path == "claude" || path.contains("claude/versions/")
+}
+
 /// Checks if a PID is a Claude Code process.
+///
+/// First attempts to identify Claude via `/proc/{pid}/exe`. If that fails
+/// (e.g., permissions, deleted binary, or wrapper script), falls back to
+/// checking `/proc/{pid}/cmdline`.
 ///
 /// Returns process info if it's Claude, None otherwise.
 fn check_claude_process(pid: u32) -> Option<ClaudeProcess> {
-    // Read /proc/{pid}/exe to check the executable
+    // Try /proc/{pid}/exe first (most reliable when available)
+    if let Some(process) = check_claude_via_exe(pid) {
+        return Some(process);
+    }
+
+    // Fallback: try /proc/{pid}/cmdline
+    // This handles cases where Claude is run via a wrapper script
+    let result = check_claude_via_cmdline(pid);
+
+    if result.is_some() {
+        trace!(pid, "Detected Claude via cmdline fallback (exe check failed)");
+    }
+
+    result
+}
+
+/// Checks if a PID is Claude by reading `/proc/{pid}/exe`.
+fn check_claude_via_exe(pid: u32) -> Option<ClaudeProcess> {
     let exe_path = format!("/proc/{pid}/exe");
     let exe = std::fs::read_link(&exe_path).ok()?;
     let exe_str = exe.to_string_lossy();
 
-    // Check if executable is Claude
-    // Matches: "claude", "/path/to/claude", "~/.local/share/claude/versions/X.Y.Z"
-    let is_claude = exe_str.ends_with("/claude")
-        || exe_str.ends_with("claude")
-        || exe_str.contains("claude/versions/");
+    if !is_claude_path(&exe_str) {
+        return None;
+    }
+
+    get_process_info(pid)
+}
+
+/// Checks if a PID is Claude by reading `/proc/{pid}/cmdline`.
+///
+/// The cmdline file contains the command-line arguments, NUL-separated.
+/// Some environments run Claude via wrappers (env, bash, etc.), which means
+/// the actual "claude" executable appears later in the argument list.
+///
+/// We check arguments that look like executable invocations (not flag arguments
+/// or file paths passed as data).
+fn check_claude_via_cmdline(pid: u32) -> Option<ClaudeProcess> {
+    let cmdline_path = format!("/proc/{pid}/cmdline");
+    let cmdline_bytes = std::fs::read(&cmdline_path).ok()?;
+
+    // cmdline is NUL-separated; split and check each argument
+    // Look for arguments that appear to be the Claude executable itself,
+    // not arguments/paths passed TO Claude (which might contain "claude" in their path)
+    let is_claude = cmdline_bytes
+        .split(|&b| b == 0)
+        .filter_map(|bytes| std::str::from_utf8(bytes).ok())
+        .filter(|s| !s.is_empty())
+        .any(|arg| {
+            // Skip arguments that start with dash (flags like --config)
+            if arg.starts_with('-') {
+                return false;
+            }
+            // Check if this argument is the claude executable
+            is_claude_path(arg)
+        });
 
     if !is_claude {
         return None;
     }
 
+    get_process_info(pid)
+}
+
+/// Gets process info (cwd, tmux pane) for a PID.
+fn get_process_info(pid: u32) -> Option<ClaudeProcess> {
     // Read working directory
     let cwd_path = format!("/proc/{pid}/cwd");
     let cwd = std::fs::read_link(&cwd_path).ok()?;
@@ -517,5 +582,42 @@ mod tests {
         let result = DiscoveryResult::default();
         assert_eq!(result.discovered, 0);
         assert_eq!(result.failed, 0);
+    }
+
+    // ========================================================================
+    // Tests for is_claude_path helper
+    // ========================================================================
+
+    #[test]
+    fn test_is_claude_path_absolute_path() {
+        assert!(is_claude_path("/usr/local/bin/claude"));
+        assert!(is_claude_path("/home/user/.local/bin/claude"));
+    }
+
+    #[test]
+    fn test_is_claude_path_bare_command() {
+        assert!(is_claude_path("claude"));
+    }
+
+    #[test]
+    fn test_is_claude_path_versioned_install() {
+        assert!(is_claude_path("/home/user/.local/share/claude/versions/1.2.3/claude"));
+        assert!(is_claude_path("~/.local/share/claude/versions/0.5.0/node"));
+    }
+
+    #[test]
+    fn test_is_claude_path_rejects_non_claude() {
+        assert!(!is_claude_path("/usr/bin/bash"));
+        assert!(!is_claude_path("vim"));
+        assert!(!is_claude_path("/home/user/claudette")); // not ending with /claude
+        assert!(!is_claude_path("claude-dev")); // not exact match
+    }
+
+    #[test]
+    fn test_is_claude_path_edge_cases() {
+        // Path that contains "claude" but not at the end or in versions
+        assert!(!is_claude_path("/home/claudeuser/bin/tool"));
+        // Empty string
+        assert!(!is_claude_path(""));
     }
 }
