@@ -54,7 +54,7 @@ async fn test_basic_lifecycle() {
     assert_eq!(view.id.as_str(), "test-session-1");
     assert_eq!(view.model, "Sonnet 4");
     assert_eq!(view.agent_type, "main"); // AgentType::GeneralPurpose.short_name() = "main"
-    assert_eq!(view.status, "active");
+    assert_eq!(view.status_label, "idle"); // New sessions start as Idle
 
     // Handle should still be connected
     assert!(handle.is_connected());
@@ -241,8 +241,9 @@ async fn test_event_subscription_hook_event_update() {
             SessionId::new("hook-event-test"),
             HookEventType::PreToolUse,
             Some("Bash".to_string()),
-            None,
-            None,
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await
         .unwrap();
@@ -256,8 +257,8 @@ async fn test_event_subscription_hook_event_update() {
     match event {
         SessionEvent::Updated { session } => {
             assert_eq!(session.id.as_str(), "hook-event-test");
-            assert_eq!(session.status, "running");
-            assert_eq!(session.status_detail, Some("Bash".to_string()));
+            assert_eq!(session.status_label, "working");
+            assert_eq!(session.activity_detail, Some("Bash".to_string()));
         }
         _ => panic!("expected Updated event, got {event:?}"),
     }
@@ -505,16 +506,17 @@ async fn test_hook_event_pre_tool_use() {
             SessionId::new("hook-pre"),
             HookEventType::PreToolUse,
             Some("Write".to_string()),
-            None,
-            None,
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await
         .expect("should apply hook event");
 
-    // Verify status changed to running
+    // Verify status changed to working
     let view = handle.get_session(SessionId::new("hook-pre")).await.unwrap();
-    assert_eq!(view.status, "running");
-    assert_eq!(view.status_detail, Some("Write".to_string()));
+    assert_eq!(view.status_label, "working");
+    assert_eq!(view.activity_detail, Some("Write".to_string()));
 }
 
 #[tokio::test]
@@ -531,8 +533,9 @@ async fn test_hook_event_post_tool_use() {
             SessionId::new("hook-post"),
             HookEventType::PreToolUse,
             Some("Bash".to_string()),
-            None,
-            None,
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await
         .unwrap();
@@ -543,18 +546,19 @@ async fn test_hook_event_post_tool_use() {
             SessionId::new("hook-post"),
             HookEventType::PostToolUse,
             Some("Bash".to_string()),
-            None,
-            None,
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await
         .expect("should apply hook event");
 
-    // Verify status changed to thinking
+    // Verify status changed to working (thinking is now Working in 3-state model)
     let view = handle
         .get_session(SessionId::new("hook-post"))
         .await
         .unwrap();
-    assert_eq!(view.status, "thinking");
+    assert_eq!(view.status_label, "working");
 }
 
 #[tokio::test]
@@ -569,8 +573,9 @@ async fn test_hook_event_nonexistent_session() {
             SessionId::new("nonexistent"),
             HookEventType::PreToolUse,
             Some("Bash".to_string()),
-            None,
-            None,
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await;
 
@@ -597,9 +602,10 @@ async fn test_hook_event_session_end() {
         .apply_hook_event(
             SessionId::new("session-end-test"),
             HookEventType::SessionEnd,
-            None,
-            None,
-            None,
+            None, // tool_name
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await
         .expect("should apply SessionEnd event");
@@ -640,9 +646,10 @@ async fn test_hook_event_session_end_nonexistent() {
         .apply_hook_event(
             SessionId::new("nonexistent-for-end"),
             HookEventType::SessionEnd,
-            None,
-            None,
-            None,
+            None, // tool_name
+            None, // notification_type
+            None, // pid
+            None, // tmux_pane
         )
         .await;
 
@@ -757,7 +764,7 @@ async fn test_session_view_fields() {
     assert_eq!(view.id_short, "8e11bfb5");
     assert_eq!(view.agent_type, "explore");
     assert_eq!(view.model, "Opus 4.5");
-    assert_eq!(view.status, "active");
+    assert_eq!(view.status_label, "idle"); // New sessions start as Idle
     assert!(!view.is_stale);
     assert!(!view.needs_attention);
 }

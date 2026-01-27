@@ -84,8 +84,11 @@ mod tests {
             id_short: id.get(..8).unwrap_or(id).to_string(),
             agent_type: "general".to_string(),
             model: "Opus 4.5".to_string(),
-            status: "active".to_string(),
-            status_detail: None,
+            status: atm_core::SessionStatus::Working,
+            status_label: "working".to_string(),
+            activity_detail: None,
+            should_blink: false,
+            status_icon: ">".to_string(),
             context_percentage: 45.0,
             context_display: "45%".to_string(),
             context_warning: false,
@@ -103,7 +106,6 @@ mod tests {
             started_at: "2024-01-15T10:00:00Z".to_string(),
             last_activity: "2024-01-15T10:05:00Z".to_string(),
             tmux_pane: None,
-            display_state: atm_core::DisplayState::Working,
         }
     }
 
