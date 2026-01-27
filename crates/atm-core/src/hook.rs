@@ -31,35 +31,66 @@ pub fn is_interactive_tool(tool_name: &str) -> bool {
 
 /// Types of hook events from Claude Code.
 ///
-/// Based on validated Claude Code hook documentation.
+/// All 12 Claude Code hook events, based on official documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum HookEventType {
-    /// Before a tool is executed (can be used for permission checks)
+    // === Tool Execution ===
+    /// Before a tool is executed
     PreToolUse,
-
-    /// After a tool completes execution
+    /// After a tool completes successfully
     PostToolUse,
+    /// After a tool fails
+    PostToolUseFailure,
 
-    /// When a new session starts (not currently used, future)
+    // === User Interaction ===
+    /// User submitted a prompt
+    UserPromptSubmit,
+    /// Claude stopped responding (finished turn)
+    Stop,
+
+    // === Subagent Lifecycle ===
+    /// A subagent was spawned
+    SubagentStart,
+    /// A subagent completed
+    SubagentStop,
+
+    // === Session Lifecycle ===
+    /// Session started (new, resumed, or cleared)
     SessionStart,
-
-    /// When a session ends (not currently used, future)
+    /// Session ended
     SessionEnd,
 
-    /// Notification event (informational)
+    // === Context Management ===
+    /// Context compaction is about to occur
+    PreCompact,
+    /// One-time setup is running
+    Setup,
+
+    // === Notifications ===
+    /// Informational notification
     Notification,
 }
 
 impl HookEventType {
     /// Returns true if this is a pre-execution event.
     pub fn is_pre_event(&self) -> bool {
-        matches!(self, Self::PreToolUse | Self::SessionStart)
+        matches!(
+            self,
+            Self::PreToolUse | Self::SessionStart | Self::PreCompact | Self::SubagentStart | Self::Setup
+        )
     }
 
     /// Returns true if this is a post-execution event.
     pub fn is_post_event(&self) -> bool {
-        matches!(self, Self::PostToolUse | Self::SessionEnd)
+        matches!(
+            self,
+            Self::PostToolUse
+                | Self::PostToolUseFailure
+                | Self::SessionEnd
+                | Self::Stop
+                | Self::SubagentStop
+        )
     }
 
     /// Parses from a hook event name string.
@@ -67,8 +98,15 @@ impl HookEventType {
         match name {
             "PreToolUse" => Some(Self::PreToolUse),
             "PostToolUse" => Some(Self::PostToolUse),
+            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
+            "UserPromptSubmit" => Some(Self::UserPromptSubmit),
+            "Stop" => Some(Self::Stop),
+            "SubagentStart" => Some(Self::SubagentStart),
+            "SubagentStop" => Some(Self::SubagentStop),
             "SessionStart" => Some(Self::SessionStart),
             "SessionEnd" => Some(Self::SessionEnd),
+            "PreCompact" => Some(Self::PreCompact),
+            "Setup" => Some(Self::Setup),
             "Notification" => Some(Self::Notification),
             _ => None,
         }
@@ -80,8 +118,15 @@ impl fmt::Display for HookEventType {
         match self {
             Self::PreToolUse => write!(f, "PreToolUse"),
             Self::PostToolUse => write!(f, "PostToolUse"),
+            Self::PostToolUseFailure => write!(f, "PostToolUseFailure"),
+            Self::UserPromptSubmit => write!(f, "UserPromptSubmit"),
+            Self::Stop => write!(f, "Stop"),
+            Self::SubagentStart => write!(f, "SubagentStart"),
+            Self::SubagentStop => write!(f, "SubagentStop"),
             Self::SessionStart => write!(f, "SessionStart"),
             Self::SessionEnd => write!(f, "SessionEnd"),
+            Self::PreCompact => write!(f, "PreCompact"),
+            Self::Setup => write!(f, "Setup"),
             Self::Notification => write!(f, "Notification"),
         }
     }
@@ -148,5 +193,49 @@ mod tests {
         // Extra whitespace should be trimmed
         assert!(is_interactive_tool("  AskUserQuestion  "));
         assert!(is_interactive_tool("\tEnterPlanMode\n"));
+    }
+
+    #[test]
+    fn test_hook_event_all_variants_parse() {
+        // Tool events
+        assert_eq!(HookEventType::from_event_name("PreToolUse"), Some(HookEventType::PreToolUse));
+        assert_eq!(HookEventType::from_event_name("PostToolUse"), Some(HookEventType::PostToolUse));
+        assert_eq!(HookEventType::from_event_name("PostToolUseFailure"), Some(HookEventType::PostToolUseFailure));
+
+        // User events
+        assert_eq!(HookEventType::from_event_name("UserPromptSubmit"), Some(HookEventType::UserPromptSubmit));
+        assert_eq!(HookEventType::from_event_name("Stop"), Some(HookEventType::Stop));
+
+        // Subagent events
+        assert_eq!(HookEventType::from_event_name("SubagentStart"), Some(HookEventType::SubagentStart));
+        assert_eq!(HookEventType::from_event_name("SubagentStop"), Some(HookEventType::SubagentStop));
+
+        // Session events
+        assert_eq!(HookEventType::from_event_name("SessionStart"), Some(HookEventType::SessionStart));
+        assert_eq!(HookEventType::from_event_name("SessionEnd"), Some(HookEventType::SessionEnd));
+
+        // Context events
+        assert_eq!(HookEventType::from_event_name("PreCompact"), Some(HookEventType::PreCompact));
+        assert_eq!(HookEventType::from_event_name("Setup"), Some(HookEventType::Setup));
+
+        // Notification
+        assert_eq!(HookEventType::from_event_name("Notification"), Some(HookEventType::Notification));
+    }
+
+    #[test]
+    fn test_hook_event_classification_extended() {
+        // Pre-events
+        assert!(HookEventType::PreToolUse.is_pre_event());
+        assert!(HookEventType::SessionStart.is_pre_event());
+        assert!(HookEventType::PreCompact.is_pre_event());
+        assert!(HookEventType::SubagentStart.is_pre_event());
+        assert!(HookEventType::Setup.is_pre_event());
+
+        // Post-events
+        assert!(HookEventType::PostToolUse.is_post_event());
+        assert!(HookEventType::PostToolUseFailure.is_post_event());
+        assert!(HookEventType::SessionEnd.is_post_event());
+        assert!(HookEventType::Stop.is_post_event());
+        assert!(HookEventType::SubagentStop.is_post_event());
     }
 }
