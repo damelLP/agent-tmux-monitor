@@ -130,11 +130,12 @@ impl RegistryActor {
                 session_id,
                 event_type,
                 tool_name,
+                notification_type,
                 pid,
                 tmux_pane,
                 respond_to,
             } => {
-                let result = self.handle_apply_hook_event(session_id, event_type, tool_name, pid, tmux_pane);
+                let result = self.handle_apply_hook_event(session_id, event_type, tool_name, notification_type, pid, tmux_pane);
                 let _ = respond_to.send(result);
             }
             RegistryCommand::GetSession {
@@ -556,6 +557,7 @@ impl RegistryActor {
         session_id: SessionId,
         event_type: HookEventType,
         tool_name: Option<String>,
+        notification_type: Option<String>,
         pid: Option<u32>,
         tmux_pane: Option<String>,
     ) -> Result<(), RegistryError> {
@@ -616,7 +618,11 @@ impl RegistryActor {
 
                         // Now get the entry we just created
                         if let Some((session, infra)) = self.sessions_by_pid.get_mut(&p) {
-                            session.apply_hook_event(event_type, tool_name.as_deref());
+                            if event_type == HookEventType::Notification {
+                                session.apply_notification(notification_type.as_deref());
+                            } else {
+                                session.apply_hook_event(event_type, tool_name.as_deref());
+                            }
                             if let Some(ref name) = tool_name {
                                 infra.record_tool_use(name, None);
                             }
@@ -644,7 +650,11 @@ impl RegistryActor {
         };
 
         // Apply the hook event to update session status
-        session.apply_hook_event(event_type, tool_name.as_deref());
+        if event_type == HookEventType::Notification {
+            session.apply_notification(notification_type.as_deref());
+        } else {
+            session.apply_hook_event(event_type, tool_name.as_deref());
+        }
 
         // Update tmux_pane if provided by hook (fills in for discovered sessions)
         if tmux_pane.is_some() && session.tmux_pane.is_none() {
@@ -1037,6 +1047,7 @@ mod tests {
             session_id: SessionId::new("test-123"),
             event_type: HookEventType::PreToolUse,
             tool_name: Some("Bash".to_string()),
+            notification_type: None,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1053,8 +1064,8 @@ mod tests {
         });
 
         let view = rx.await.unwrap().unwrap();
-        assert_eq!(view.status, "running");
-        assert_eq!(view.status_detail, Some("Bash".to_string()));
+        assert_eq!(view.status_label, "working");
+        assert_eq!(view.activity_detail, Some("Bash".to_string()));
     }
 
     #[tokio::test]
@@ -1080,6 +1091,7 @@ mod tests {
             session_id: SessionId::new("test-session-end"),
             event_type: HookEventType::SessionEnd,
             tool_name: None,
+            notification_type: None,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1112,6 +1124,7 @@ mod tests {
             session_id: SessionId::new("nonexistent"),
             event_type: HookEventType::SessionEnd,
             tool_name: None,
+            notification_type: None,
             pid: None,
             tmux_pane: None,
             respond_to: tx,

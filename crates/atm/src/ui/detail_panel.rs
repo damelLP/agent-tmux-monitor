@@ -3,8 +3,8 @@
 //! Displays detailed information about a selected session
 //! in the right panel of the split layout.
 
-use crate::ui::theme::{context_color, display_state_color};
-use atm_core::{DisplayState, SessionView};
+use crate::ui::theme::{context_color, status_color};
+use atm_core::{SessionStatus, SessionView};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -72,19 +72,15 @@ fn build_detail_lines_inline(session: &SessionView) -> Vec<Line<'static>> {
 
     let ctx_color = context_color(session.context_percentage, session.context_critical);
 
-    // Status line with display state
-    let status_display = format!(
-        "{} [{}]",
-        match session.status_detail.as_ref() {
-            Some(detail) => format!("{} ({})", session.status, detail),
-            None => session.status.clone(),
-        },
-        session.display_state.label()
-    );
+    // Status line with activity detail
+    let status_display = match session.activity_detail.as_ref() {
+        Some(detail) => format!("{} ({})", session.status_label, detail),
+        None => session.status_label.clone(),
+    };
 
     let status_style = Style::default()
-        .fg(display_state_color(session.display_state))
-        .add_modifier(if matches!(session.display_state, DisplayState::Working | DisplayState::Compacting | DisplayState::NeedsInput) {
+        .fg(status_color(session.status))
+        .add_modifier(if matches!(session.status, SessionStatus::Working | SessionStatus::AttentionNeeded) {
             Modifier::BOLD
         } else {
             Modifier::empty()

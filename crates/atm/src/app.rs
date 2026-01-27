@@ -269,7 +269,7 @@ impl App {
     pub fn working_count(&self) -> usize {
         self.sessions
             .values()
-            .filter(|s| matches!(s.display_state, atm_core::DisplayState::Working))
+            .filter(|s| matches!(s.status, atm_core::SessionStatus::Working))
             .count()
     }
 }
@@ -288,8 +288,11 @@ mod tests {
             id_short: id.get(..8).unwrap_or(id).to_string(),
             agent_type: "general".to_string(),
             model: "Opus 4.5".to_string(),
-            status: "active".to_string(),
-            status_detail: None,
+            status: atm_core::SessionStatus::Working,
+            status_label: "working".to_string(),
+            activity_detail: None,
+            should_blink: false,
+            status_icon: ">".to_string(),
             context_percentage: 25.0,
             context_display: "25%".to_string(),
             context_warning: false,
@@ -307,7 +310,6 @@ mod tests {
             started_at: started_at.to_string(),
             last_activity: "2024-01-15T10:05:00Z".to_string(),
             tmux_pane: None,
-            display_state: atm_core::DisplayState::Working,
         }
     }
 
@@ -656,9 +658,9 @@ mod tests {
         assert_eq!(app.working_count(), 0);
 
         let session1 = create_test_session("session-1", "2024-01-15T10:00:00Z");
-        // session1 has display_state = Working by default
+        // session1 has status = Working by default
         let mut session2 = create_test_session("session-2", "2024-01-15T10:01:00Z");
-        session2.display_state = atm_core::DisplayState::Stale;
+        session2.status = atm_core::SessionStatus::Idle;
 
         app.update_sessions(vec![session1, session2]);
         assert_eq!(app.working_count(), 1);

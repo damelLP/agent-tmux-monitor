@@ -4,7 +4,7 @@
 //! real-time status updates including context usage, cost, and duration.
 
 use crate::app::{App, AppState};
-use crate::ui::theme::{context_color, display_state_background, display_state_color, display_state_icon};
+use crate::ui::theme::{context_color, status_background, status_color, status_icon};
 use atm_core::SessionView;
 use ratatui::{
     layout::Rect,
@@ -81,9 +81,9 @@ fn create_session_item(
     let context_pct = session.context_percentage;
     let ctx_color = context_color(context_pct, session.context_critical);
 
-    // Get display state icon and color from theme
-    let status_icon = display_state_icon(session.display_state, blink_visible);
-    let icon_color = display_state_color(session.display_state);
+    // Get status icon and color from theme
+    let icon = status_icon(session.status, blink_visible);
+    let icon_color = status_color(session.status);
 
     // Build the condensed line
     let spans = vec![
@@ -96,7 +96,7 @@ fn create_session_item(
         ),
         // Status icon (blinking for attention states)
         Span::styled(
-            format!("{status_icon} "),
+            format!("{icon} "),
             Style::default()
                 .fg(icon_color)
                 .add_modifier(Modifier::BOLD),
@@ -130,8 +130,8 @@ fn create_session_item(
 
 /// Returns the background style for a session row.
 fn get_row_background_style(session: &SessionView, is_selected: bool) -> Style {
-    // Priority: display state background > critical context > selection
-    let bg_color = display_state_background(session.display_state).or(
+    // Priority: status background > critical context > selection
+    let bg_color = status_background(session.status).or(
         if session.context_critical {
             Some(Color::Rgb(40, 0, 0)) // Subtle red tint
         } else if is_selected {
@@ -288,7 +288,7 @@ fn render_empty_state(frame: &mut Frame, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{DisplayState, SessionId};
+    use atm_core::{SessionId, SessionStatus};
 
     fn test_session() -> SessionView {
         SessionView {
@@ -296,8 +296,11 @@ mod tests {
             id_short: "test-ses".to_string(),
             agent_type: "general".to_string(),
             model: "Opus 4.5".to_string(),
-            status: "active".to_string(),
-            status_detail: None,
+            status: SessionStatus::Working,
+            status_label: "working".to_string(),
+            activity_detail: None,
+            should_blink: false,
+            status_icon: ">".to_string(),
             context_percentage: 25.0,
             context_display: "25%".to_string(),
             context_warning: false,
@@ -315,32 +318,31 @@ mod tests {
             started_at: "2024-01-15T10:00:00Z".to_string(),
             last_activity: "2024-01-15T10:05:00Z".to_string(),
             tmux_pane: None,
-            display_state: DisplayState::Working,
         }
     }
 
     #[test]
-    fn test_display_state_icon_via_theme() {
+    fn test_status_icon_via_theme() {
         // Icon logic is now in theme module, just verify integration
         let session = test_session();
-        assert_eq!(display_state_icon(session.display_state, true), ">");
+        assert_eq!(status_icon(session.status, true), ">");
     }
 
     #[test]
-    fn test_display_state_needs_input_blinks() {
+    fn test_status_attention_needed_blinks() {
         let mut session = test_session();
-        session.display_state = DisplayState::NeedsInput;
-        assert_eq!(display_state_icon(session.display_state, true), "!");
-        assert_eq!(display_state_icon(session.display_state, false), " ");
+        session.status = SessionStatus::AttentionNeeded;
+        assert_eq!(status_icon(session.status, true), "!");
+        assert_eq!(status_icon(session.status, false), " ");
     }
 
     #[test]
-    fn test_display_state_stale_no_blink() {
+    fn test_status_idle_no_blink() {
         let mut session = test_session();
-        session.display_state = DisplayState::Stale;
-        // Stale does NOT blink - low priority, doesn't need attention
-        assert_eq!(display_state_icon(session.display_state, true), "z");
-        assert_eq!(display_state_icon(session.display_state, false), "z");
+        session.status = SessionStatus::Idle;
+        // Idle does NOT blink - it's chill
+        assert_eq!(status_icon(session.status, true), "-");
+        assert_eq!(status_icon(session.status, false), "-");
     }
 
     #[test]

@@ -141,6 +141,7 @@ impl RegistryHandle {
         session_id: SessionId,
         event_type: HookEventType,
         tool_name: Option<String>,
+        notification_type: Option<String>,
         pid: Option<u32>,
         tmux_pane: Option<String>,
     ) -> Result<(), RegistryError> {
@@ -151,6 +152,7 @@ impl RegistryHandle {
                 session_id,
                 event_type,
                 tool_name,
+                notification_type,
                 pid,
                 tmux_pane,
                 respond_to: tx,
@@ -446,6 +448,7 @@ mod tests {
                 session_id,
                 event_type,
                 tool_name,
+                notification_type,
                 pid,
                 tmux_pane,
                 respond_to,
@@ -454,6 +457,7 @@ mod tests {
                 assert_eq!(session_id.as_str(), "test-123");
                 assert!(matches!(event_type, HookEventType::PreToolUse));
                 assert_eq!(tool_name, Some("Bash".to_string()));
+                assert_eq!(notification_type, None);
                 assert_eq!(pid, Some(12345));
                 assert_eq!(tmux_pane, Some("%5".to_string()));
                 let _ = respond_to.send(Ok(()));
@@ -467,6 +471,7 @@ mod tests {
                 SessionId::new("test-123"),
                 HookEventType::PreToolUse,
                 Some("Bash".to_string()),
+                None, // notification_type
                 Some(12345),
                 Some("%5".to_string()),
             )

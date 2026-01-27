@@ -77,6 +77,8 @@ pub enum RegistryCommand {
         event_type: HookEventType,
         /// Name of the tool (for tool-related events)
         tool_name: Option<String>,
+        /// Notification type (for Notification events)
+        notification_type: Option<String>,
         /// Process ID of the Claude Code process (for lifecycle tracking)
         pid: Option<u32>,
         /// Tmux pane ID if running in tmux

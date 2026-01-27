@@ -428,6 +428,7 @@ impl ConnectionHandler {
                 raw_event.session_id(),
                 event_type,
                 raw_event.tool_name,
+                raw_event.notification_type,
                 raw_event.pid,
                 raw_event.tmux_pane,
             )

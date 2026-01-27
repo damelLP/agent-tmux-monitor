@@ -2,7 +2,7 @@
 //!
 //! Provides consistent styling across all UI components.
 
-use atm_core::DisplayState;
+use atm_core::SessionStatus;
 use ratatui::style::Color;
 
 /// Returns the appropriate color for context usage display.
@@ -34,64 +34,60 @@ pub fn context_color(percentage: f64, is_critical: bool) -> Color {
     }
 }
 
-/// Returns the appropriate color for a display state.
+/// Returns the appropriate color for a session status.
 ///
 /// Color coding:
 /// - Blue: Working (active, normal operation)
-/// - Magenta: Compacting (context management in progress)
-/// - Yellow: NeedsInput (blocked, requires urgent attention)
+/// - Yellow: AttentionNeeded (blocked, requires urgent attention)
 /// - LightMagenta: Idle (relaxed, waiting for user prompt)
-/// - DarkGray: Stale (abandoned, low priority)
 ///
 /// # Arguments
-/// * `state` - The display state to colorize
+/// * `status` - The session status to colorize
 ///
 /// # Returns
-/// The appropriate `Color` for the state
-pub fn display_state_color(state: DisplayState) -> Color {
-    match state {
-        DisplayState::Working => Color::Blue,
-        DisplayState::Compacting => Color::Magenta,
-        DisplayState::NeedsInput => Color::Yellow,
-        DisplayState::Idle => Color::LightMagenta,
-        DisplayState::Stale => Color::DarkGray,
+/// The appropriate `Color` for the status
+pub fn status_color(status: SessionStatus) -> Color {
+    match status {
+        SessionStatus::Working => Color::Blue,
+        SessionStatus::AttentionNeeded => Color::Yellow,
+        SessionStatus::Idle => Color::LightMagenta,
     }
 }
 
-/// Returns the icon for a display state, respecting blink visibility.
+/// Returns the icon for a session status, respecting blink visibility.
 ///
-/// States that blink (NeedsInput, Stale) return empty string when blink is off.
+/// AttentionNeeded blinks - returns empty string when blink is off.
 ///
 /// # Arguments
-/// * `state` - The display state
+/// * `status` - The session status
 /// * `blink_visible` - Whether blinking elements should be visible
 ///
 /// # Returns
 /// The icon string (may be empty if blinking and blink_visible is false)
-pub fn display_state_icon(state: DisplayState, blink_visible: bool) -> &'static str {
-    if state.should_blink() && !blink_visible {
+pub fn status_icon(status: SessionStatus, blink_visible: bool) -> &'static str {
+    if status.should_blink() && !blink_visible {
         " "
     } else {
-        state.icon()
+        status.icon()
     }
 }
 
-/// Returns the row background color for a display state.
+/// Returns the row background color for a session status.
 ///
-/// Only NeedsInput gets a background tint to draw urgent attention.
+/// Only AttentionNeeded gets a background tint to draw urgent attention.
 /// Idle does NOT get a background - it's a relaxed state.
 /// Critical context gets red tint (handled separately by caller).
 ///
 /// # Arguments
-/// * `state` - The display state
+/// * `status` - The session status
 ///
 /// # Returns
 /// Optional background color
-pub fn display_state_background(state: DisplayState) -> Option<Color> {
-    match state {
-        DisplayState::NeedsInput => Some(Color::Rgb(50, 40, 0)), // Subtle yellow/amber tint
-        DisplayState::Idle => None,                              // No tint - relaxed state
-        _ => None,
+pub fn status_background(status: SessionStatus) -> Option<Color> {
+    match status {
+        SessionStatus::AttentionNeeded => Some(Color::Rgb(50, 40, 0)), // Subtle yellow/amber tint
+        SessionStatus::Idle => None,                                   // No tint - relaxed state
+        SessionStatus::Working => None,
     }
 }
 
@@ -129,63 +125,45 @@ mod tests {
     }
 
     #[test]
-    fn test_display_state_color_working() {
-        assert_eq!(display_state_color(DisplayState::Working), Color::Blue);
+    fn test_status_color_working() {
+        assert_eq!(status_color(SessionStatus::Working), Color::Blue);
     }
 
     #[test]
-    fn test_display_state_color_compacting() {
-        assert_eq!(display_state_color(DisplayState::Compacting), Color::Magenta);
+    fn test_status_color_attention_needed() {
+        assert_eq!(status_color(SessionStatus::AttentionNeeded), Color::Yellow);
     }
 
     #[test]
-    fn test_display_state_color_needs_input() {
-        assert_eq!(display_state_color(DisplayState::NeedsInput), Color::Yellow);
+    fn test_status_color_idle() {
+        assert_eq!(status_color(SessionStatus::Idle), Color::LightMagenta);
     }
 
     #[test]
-    fn test_display_state_color_idle() {
-        assert_eq!(display_state_color(DisplayState::Idle), Color::LightMagenta);
-    }
-
-    #[test]
-    fn test_display_state_color_stale() {
-        assert_eq!(display_state_color(DisplayState::Stale), Color::DarkGray);
-    }
-
-    #[test]
-    fn test_display_state_icon_working() {
+    fn test_status_icon_working() {
         // Working doesn't blink, always shows icon
-        assert_eq!(display_state_icon(DisplayState::Working, true), ">");
-        assert_eq!(display_state_icon(DisplayState::Working, false), ">");
+        assert_eq!(status_icon(SessionStatus::Working, true), ">");
+        assert_eq!(status_icon(SessionStatus::Working, false), ">");
     }
 
     #[test]
-    fn test_display_state_icon_needs_input_blinks() {
-        // NeedsInput blinks
-        assert_eq!(display_state_icon(DisplayState::NeedsInput, true), "!");
-        assert_eq!(display_state_icon(DisplayState::NeedsInput, false), " ");
+    fn test_status_icon_attention_needed_blinks() {
+        // AttentionNeeded blinks
+        assert_eq!(status_icon(SessionStatus::AttentionNeeded, true), "!");
+        assert_eq!(status_icon(SessionStatus::AttentionNeeded, false), " ");
     }
 
     #[test]
-    fn test_display_state_icon_idle_no_blink() {
+    fn test_status_icon_idle_no_blink() {
         // Idle does NOT blink - it's chill
-        assert_eq!(display_state_icon(DisplayState::Idle, true), "-");
-        assert_eq!(display_state_icon(DisplayState::Idle, false), "-");
+        assert_eq!(status_icon(SessionStatus::Idle, true), "-");
+        assert_eq!(status_icon(SessionStatus::Idle, false), "-");
     }
 
     #[test]
-    fn test_display_state_icon_stale_no_blink() {
-        // Stale does NOT blink - it's low priority, doesn't need attention
-        assert_eq!(display_state_icon(DisplayState::Stale, true), "z");
-        assert_eq!(display_state_icon(DisplayState::Stale, false), "z");
-    }
-
-    #[test]
-    fn test_display_state_background() {
-        assert!(display_state_background(DisplayState::NeedsInput).is_some());
-        assert!(display_state_background(DisplayState::Working).is_none());
-        assert!(display_state_background(DisplayState::Idle).is_none()); // Idle is chill, no highlight
-        assert!(display_state_background(DisplayState::Stale).is_none());
+    fn test_status_background() {
+        assert!(status_background(SessionStatus::AttentionNeeded).is_some());
+        assert!(status_background(SessionStatus::Working).is_none());
+        assert!(status_background(SessionStatus::Idle).is_none()); // Idle is chill, no highlight
     }
 }
