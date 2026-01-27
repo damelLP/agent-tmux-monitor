@@ -162,101 +162,75 @@ impl AsRef<Path> for TranscriptPath {
 }
 
 // ============================================================================
-// Session Status
+// Session Status (3-State Model)
 // ============================================================================
 
 /// Current operational status of a session.
 ///
-/// Derived from session activity patterns and hook events.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
+/// Three fundamental states based on user action requirements:
+/// - **Idle**: Nothing happening - Claude finished, waiting for user
+/// - **Working**: Claude is actively processing - user just waits
+/// - **AttentionNeeded**: User must act for session to proceed
+///
+/// Staleness is NOT a status - it's a computed property via `is_stale()`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
-    /// Session is actively processing (received update within 5 seconds)
-    Active,
-
-    /// Agent is thinking/generating (between tool calls)
-    Thinking,
-
-    /// Agent is executing a tool
-    RunningTool {
-        /// Name of the tool being executed
-        tool_name: String,
-        /// When tool execution started
-        #[serde(skip_serializing_if = "Option::is_none")]
-        started_at: Option<DateTime<Utc>>,
-    },
-
-    /// Agent is waiting for user permission to execute a tool
-    WaitingForPermission {
-        /// Tool awaiting permission
-        tool_name: String,
-    },
-
-    /// Session is idle (no activity for extended period)
+    /// Session is idle - Claude finished, waiting for user's next action.
+    /// User can take their time, no urgency.
+    #[default]
     Idle,
 
-    /// Session is stale (no activity for >8 hours, pending cleanup)
-    Stale,
+    /// Claude is actively processing - user just waits.
+    /// Work is happening, no user action needed.
+    Working,
+
+    /// User must take action for the session to proceed.
+    /// Something is blocked waiting for user input.
+    AttentionNeeded,
 }
 
 impl SessionStatus {
-    /// Returns true if the session is in an active state.
-    pub fn is_active(&self) -> bool {
-        matches!(
-            self,
-            Self::Active | Self::Thinking | Self::RunningTool { .. }
-        )
-    }
-
-    /// Returns true if the session is waiting for user input.
-    pub fn needs_attention(&self) -> bool {
-        matches!(self, Self::WaitingForPermission { .. })
-    }
-
-    /// Returns true if the session may be cleaned up.
-    pub fn is_removable(&self) -> bool {
-        matches!(self, Self::Stale)
-    }
-
-    /// Returns a short status label for display.
-    pub fn label(&self) -> &str {
+    /// Returns the display label for this status.
+    pub fn label(&self) -> &'static str {
         match self {
-            Self::Active => "active",
-            Self::Thinking => "thinking",
-            Self::RunningTool { .. } => "running",
-            Self::WaitingForPermission { .. } => "waiting",
             Self::Idle => "idle",
-            Self::Stale => "stale",
+            Self::Working => "working",
+            Self::AttentionNeeded => "needs input",
         }
     }
 
-    /// Returns the tool name if applicable.
-    pub fn tool_name(&self) -> Option<&str> {
+    /// Returns the ASCII icon for this status.
+    pub fn icon(&self) -> &'static str {
         match self {
-            Self::RunningTool { tool_name, .. } => Some(tool_name.as_str()),
-            Self::WaitingForPermission { tool_name } => Some(tool_name.as_str()),
-            _ => None,
+            Self::Idle => "-",
+            Self::Working => ">",
+            Self::AttentionNeeded => "!",
         }
     }
-}
 
-impl Default for SessionStatus {
-    fn default() -> Self {
-        Self::Active
+    /// Returns true if this status should blink in the UI.
+    pub fn should_blink(&self) -> bool {
+        matches!(self, Self::AttentionNeeded)
+    }
+
+    /// Returns true if the session is actively processing.
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Working)
+    }
+
+    /// Returns true if user action is needed.
+    pub fn needs_attention(&self) -> bool {
+        matches!(self, Self::AttentionNeeded)
     }
 }
 
 impl fmt::Display for SessionStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Active => write!(f, "Active"),
-            Self::Thinking => write!(f, "Thinking..."),
-            Self::RunningTool { tool_name, .. } => write!(f, "Running: {tool_name}"),
-            Self::WaitingForPermission { tool_name } => {
-                write!(f, "Permission: {tool_name}")
-            }
             Self::Idle => write!(f, "Idle"),
-            Self::Stale => write!(f, "Stale"),
+            Self::Working => write!(f, "Working"),
+            Self::AttentionNeeded => write!(f, "Needs Input"),
         }
     }
 }
@@ -325,207 +299,6 @@ impl ActivityDetail {
 impl Default for ActivityDetail {
     fn default() -> Self {
         Self::thinking()
-    }
-}
-
-// ============================================================================
-// Display State (UI Layer)
-// ============================================================================
-
-/// Visual display state for a session in the TUI.
-///
-/// Represents the simplified user-facing state of a session, derived from
-/// the underlying `SessionStatus` and activity timing. This provides clear
-/// visual feedback about whether the user needs to take action.
-///
-/// ## State Definitions
-///
-/// - **Working**: Claude is actively processing (recent activity within 5s)
-/// - **Compacting**: Working after significant context reduction
-/// - **NeedsInput**: User's turn - either permission needed or awaiting next message
-/// - **Stale**: No activity for extended period (>8 hours)
-///
-/// ## Key Insight
-///
-/// If Claude isn't actively generating or running a tool with recent activity,
-/// the session needs user input. Tool execution without updates likely means
-/// Claude is waiting for user confirmation ("Do you want to proceed?").
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum DisplayState {
-    /// Actively processing with recent activity
-    #[default]
-    Working,
-
-    /// Working after context reduction (compaction detected)
-    Compacting,
-
-    /// Waiting for user input or permission (blocked, urgent)
-    NeedsInput,
-
-    /// Idle - no recent activity but not stale (relaxed, non-urgent)
-    Idle,
-
-    /// No activity for extended period (>8 hours)
-    Stale,
-}
-
-impl DisplayState {
-    /// Activity threshold in seconds - below this is considered "recent".
-    const ACTIVITY_THRESHOLD_SECS: i64 = 5;
-
-    /// Stale threshold in seconds (8 hours) - matches SessionDomain::is_stale().
-    const STALE_THRESHOLD_SECS: i64 = 8 * 3600;
-
-    /// Compaction detection: previous context must have been at least this high.
-    const COMPACTION_HIGH_THRESHOLD: f64 = 70.0;
-
-    /// Compaction detection: context must drop by at least this much.
-    const COMPACTION_DROP_THRESHOLD: f64 = 20.0;
-
-    /// Returns the display label for this state.
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Working => "working",
-            Self::Compacting => "compacting",
-            Self::NeedsInput => "needs input",
-            Self::Idle => "idle",
-            Self::Stale => "stale",
-        }
-    }
-
-    /// Returns the ASCII icon for this state.
-    ///
-    /// Uses ASCII characters for terminal compatibility:
-    /// - `>` Working (active indicator)
-    /// - `~` Compacting (context shrinking)
-    /// - `!` NeedsInput (attention needed)
-    /// - `-` Idle (relaxed, waiting)
-    /// - `z` Stale (sleeping)
-    pub fn icon(&self) -> &'static str {
-        match self {
-            Self::Working => ">",
-            Self::Compacting => "~",
-            Self::NeedsInput => "!",
-            Self::Idle => "-",
-            Self::Stale => "z",
-        }
-    }
-
-    /// Returns a description of this state.
-    pub fn description(&self) -> &'static str {
-        match self {
-            Self::Working => "Session is actively processing",
-            Self::Compacting => "Working after context reduction",
-            Self::NeedsInput => "Waiting for user input or permission",
-            Self::Idle => "Session idle, awaiting user prompt",
-            Self::Stale => "No activity for extended period",
-        }
-    }
-
-    /// Returns true if this state should blink in the UI.
-    ///
-    /// Only truly urgent/blocked states blink:
-    /// - NeedsInput: Blocked, waiting for permission (urgent)
-    ///
-    /// States that do NOT blink:
-    /// - Idle: Relaxed "waiting for user" state
-    /// - Stale: Old session, low priority, doesn't need attention
-    pub fn should_blink(&self) -> bool {
-        matches!(self, Self::NeedsInput)
-    }
-
-    /// Determines display state from session data.
-    ///
-    /// # Algorithm
-    ///
-    /// 1. Stale check: >8 hours idle → Stale
-    /// 2. Permission check: waiting for permission → NeedsInput (urgent, blocked)
-    /// 3. Explicit Thinking/RunningTool status → Working (trust these regardless of activity)
-    /// 4. Generic Active status with recent activity (<5s) → Working/Compacting
-    /// 5. Generic Active status without recent activity → Idle (relaxed, non-urgent)
-    /// 6. Otherwise → Idle
-    ///
-    /// # Arguments
-    ///
-    /// * `time_since_activity_secs` - Seconds since last activity
-    /// * `status` - Current session status
-    /// * `context_percentage` - Current context usage percentage
-    /// * `previous_context_percentage` - Previous context percentage for compaction detection
-    pub fn from_session(
-        time_since_activity_secs: i64,
-        status: &SessionStatus,
-        context_percentage: f64,
-        previous_context_percentage: Option<f64>,
-    ) -> Self {
-        // Priority 1: Stale (no activity for 8+ hours OR explicit Stale status)
-        if time_since_activity_secs > Self::STALE_THRESHOLD_SECS {
-            return Self::Stale;
-        }
-
-        // Priority 2: Explicit Idle/Stale status from domain
-        // (handles cases where status is set directly, e.g., during testing)
-        match status {
-            SessionStatus::Stale => return Self::Stale,
-            SessionStatus::Idle => return Self::Idle,
-            _ => {}
-        }
-
-        // Priority 3: Waiting for permission = needs input
-        if status.needs_attention() {
-            return Self::NeedsInput;
-        }
-
-        // Priority 4: Explicit Thinking/RunningTool status = Working
-        // Trust these statuses regardless of activity timeout - they indicate
-        // Claude is actively processing (either generating response or running tool)
-        match status {
-            SessionStatus::Thinking | SessionStatus::RunningTool { .. } => {
-                // Check for compaction even during thinking
-                if let Some(prev_pct) = previous_context_percentage {
-                    let dropped = prev_pct - context_percentage;
-                    if prev_pct >= Self::COMPACTION_HIGH_THRESHOLD
-                        && dropped >= Self::COMPACTION_DROP_THRESHOLD
-                    {
-                        return Self::Compacting;
-                    }
-                }
-                return Self::Working;
-            }
-            _ => {}
-        }
-
-        // Check if session has recent activity
-        let has_recent_activity = time_since_activity_secs < Self::ACTIVITY_THRESHOLD_SECS;
-
-        // Generic Active status without recent activity = idle, waiting for user
-        // (relaxed state, not urgent - user can take their time)
-        if !has_recent_activity {
-            return Self::Idle;
-        }
-
-        // Recent activity + active status = Working (or Compacting)
-        if status.is_active() {
-            // Check for compaction: context was high and dropped significantly
-            if let Some(prev_pct) = previous_context_percentage {
-                let dropped = prev_pct - context_percentage;
-                if prev_pct >= Self::COMPACTION_HIGH_THRESHOLD
-                    && dropped >= Self::COMPACTION_DROP_THRESHOLD
-                {
-                    return Self::Compacting;
-                }
-            }
-            return Self::Working;
-        }
-
-        // Default: idle (waiting for user)
-        Self::Idle
-    }
-}
-
-impl fmt::Display for DisplayState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.label())
     }
 }
 
@@ -697,8 +470,12 @@ pub struct SessionDomain {
     /// Claude model being used
     pub model: Model,
 
-    /// Current session status
+    /// Current session status (3-state model)
     pub status: SessionStatus,
+
+    /// Current activity details (tool name, context, timing)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_activity: Option<ActivityDetail>,
 
     /// Context window usage
     pub context: ContextUsage,
@@ -739,7 +516,8 @@ impl SessionDomain {
             id,
             agent_type,
             model,
-            status: SessionStatus::Active,
+            status: SessionStatus::Idle,
+            current_activity: None,
             context: ContextUsage::new(model.context_window_size()),
             cost: Money::zero(),
             duration: SessionDuration::default(),
@@ -829,9 +607,10 @@ impl SessionDomain {
         self.context.cache_read_tokens = TokenCount::new(cache_read_tokens);
         self.last_activity = Utc::now();
 
-        // Update status based on activity
-        if !matches!(self.status, SessionStatus::WaitingForPermission { .. }) {
-            self.status = SessionStatus::Active;
+        // Status line update means Claude is working
+        // Don't override AttentionNeeded (permission wait)
+        if self.status != SessionStatus::AttentionNeeded {
+            self.status = SessionStatus::Working;
         }
     }
 
@@ -842,32 +621,76 @@ impl SessionDomain {
         match event_type {
             HookEventType::PreToolUse => {
                 if let Some(name) = tool_name {
-                    // Check if this is an interactive tool that waits for user input
                     if is_interactive_tool(name) {
-                        self.status = SessionStatus::WaitingForPermission {
-                            tool_name: name.to_string(),
-                        };
+                        self.status = SessionStatus::AttentionNeeded;
+                        self.current_activity = Some(ActivityDetail::new(name));
                     } else {
-                        self.status = SessionStatus::RunningTool {
-                            tool_name: name.to_string(),
-                            started_at: Some(Utc::now()),
-                        };
+                        self.status = SessionStatus::Working;
+                        self.current_activity = Some(ActivityDetail::new(name));
                     }
                 }
             }
-            HookEventType::PostToolUse => {
-                self.status = SessionStatus::Thinking;
+            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::thinking());
             }
-            _ => {}
+            HookEventType::UserPromptSubmit => {
+                self.status = SessionStatus::Working;
+                self.current_activity = None;
+            }
+            HookEventType::Stop => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            HookEventType::SessionStart => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            HookEventType::SessionEnd => {
+                // Session will be removed by registry
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            HookEventType::PreCompact => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::with_context("Compacting"));
+            }
+            HookEventType::Setup => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::with_context("Setup"));
+            }
+            HookEventType::Notification => {
+                // Notification handling is done separately with notification_type
+                // This is a fallback - don't change status
+            }
+            HookEventType::SubagentStart | HookEventType::SubagentStop => {
+                // Subagent tracking deferred to future PR
+                self.status = SessionStatus::Working;
+            }
         }
     }
 
-    /// Marks the session as waiting for permission.
-    pub fn set_waiting_for_permission(&mut self, tool_name: &str) {
-        self.status = SessionStatus::WaitingForPermission {
-            tool_name: tool_name.to_string(),
-        };
+    /// Updates status based on a notification event.
+    pub fn apply_notification(&mut self, notification_type: Option<&str>) {
         self.last_activity = Utc::now();
+
+        match notification_type {
+            Some("permission_prompt") => {
+                self.status = SessionStatus::AttentionNeeded;
+                self.current_activity = Some(ActivityDetail::with_context("Permission"));
+            }
+            Some("idle_prompt") => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            Some("elicitation_dialog") => {
+                self.status = SessionStatus::AttentionNeeded;
+                self.current_activity = Some(ActivityDetail::with_context("MCP Input"));
+            }
+            _ => {
+                // Informational notification - no status change
+            }
+        }
     }
 
     /// Returns the session age (time since started).
@@ -1127,11 +950,20 @@ pub struct SessionView {
     /// Model display name
     pub model: String,
 
-    /// Status label
-    pub status: String,
+    /// Current status (3-state model)
+    pub status: SessionStatus,
 
-    /// Status detail (tool name if applicable)
-    pub status_detail: Option<String>,
+    /// Status label for display
+    pub status_label: String,
+
+    /// Activity detail (tool name or context)
+    pub activity_detail: Option<String>,
+
+    /// Whether this status should blink
+    pub should_blink: bool,
+
+    /// Status icon
+    pub status_icon: String,
 
     /// Context usage percentage
     pub context_percentage: f64,
@@ -1183,9 +1015,6 @@ pub struct SessionView {
 
     /// Tmux pane ID (e.g., "%5") if session is running in tmux
     pub tmux_pane: Option<String>,
-
-    /// Display state for UI visualization (working/needs_input/stale/compacting)
-    pub display_state: DisplayState,
 }
 
 impl SessionView {
@@ -1200,8 +1029,11 @@ impl SessionView {
             id_short: session.id.short().to_string(),
             agent_type: session.agent_type.short_name().to_string(),
             model: session.model.display_name().to_string(),
-            status: session.status.label().to_string(),
-            status_detail: session.status.tool_name().map(|s| s.to_string()),
+            status: session.status,
+            status_label: session.status.label().to_string(),
+            activity_detail: session.current_activity.as_ref().map(|a| a.display()),
+            should_blink: session.status.should_blink(),
+            status_icon: session.status.icon().to_string(),
             context_percentage: session.context.usage_percentage(),
             context_display: session.context.format(),
             context_warning: session.context.is_warning(),
@@ -1226,12 +1058,6 @@ impl SessionView {
             started_at: session.started_at.to_rfc3339(),
             last_activity: session.last_activity.to_rfc3339(),
             tmux_pane: session.tmux_pane.clone(),
-            display_state: DisplayState::from_session(
-                since_activity.num_seconds(),
-                &session.status,
-                session.context.usage_percentage(),
-                None, // TODO: Track previous context % for compaction detection
-            ),
         }
     }
 }
@@ -1285,11 +1111,8 @@ mod tests {
 
     #[test]
     fn test_session_status_display() {
-        let status = SessionStatus::RunningTool {
-            tool_name: "Bash".to_string(),
-            started_at: None,
-        };
-        assert_eq!(format!("{status}"), "Running: Bash");
+        let status = SessionStatus::Working;
+        assert_eq!(format!("{status}"), "Working");
     }
 
     #[test]
@@ -1370,17 +1193,18 @@ mod tests {
     fn test_apply_hook_event_interactive_tool() {
         let mut session = create_test_session("test-interactive");
 
-        // PreToolUse with interactive tool → WaitingForPermission
+        // PreToolUse with interactive tool → AttentionNeeded
         session.apply_hook_event(HookEventType::PreToolUse, Some("AskUserQuestion"));
 
-        assert!(matches!(
-            session.status,
-            SessionStatus::WaitingForPermission { ref tool_name } if tool_name == "AskUserQuestion"
-        ));
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session.current_activity.as_ref().map(|a| a.display()),
+            Some("AskUserQuestion".to_string())
+        );
 
-        // PostToolUse → back to Thinking
+        // PostToolUse → back to Working (thinking)
         session.apply_hook_event(HookEventType::PostToolUse, None);
-        assert!(matches!(session.status, SessionStatus::Thinking));
+        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
@@ -1390,33 +1214,35 @@ mod tests {
         // EnterPlanMode is also interactive
         session.apply_hook_event(HookEventType::PreToolUse, Some("EnterPlanMode"));
 
-        assert!(matches!(
-            session.status,
-            SessionStatus::WaitingForPermission { ref tool_name } if tool_name == "EnterPlanMode"
-        ));
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session.current_activity.as_ref().map(|a| a.display()),
+            Some("EnterPlanMode".to_string())
+        );
     }
 
     #[test]
     fn test_apply_hook_event_standard_tool() {
         let mut session = create_test_session("test-standard");
 
-        // PreToolUse with standard tool → RunningTool
+        // PreToolUse with standard tool → Working
         session.apply_hook_event(HookEventType::PreToolUse, Some("Bash"));
 
-        assert!(matches!(
-            session.status,
-            SessionStatus::RunningTool { ref tool_name, .. } if tool_name == "Bash"
-        ));
+        assert_eq!(session.status, SessionStatus::Working);
+        assert_eq!(
+            session.current_activity.as_ref().map(|a| a.display()),
+            Some("Bash".to_string())
+        );
 
-        // PostToolUse → back to Thinking
+        // PostToolUse → still Working (thinking)
         session.apply_hook_event(HookEventType::PostToolUse, Some("Bash"));
-        assert!(matches!(session.status, SessionStatus::Thinking));
+        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
     fn test_apply_hook_event_none_tool_name() {
         let mut session = create_test_session("test-none");
-        let original_status = session.status.clone();
+        let original_status = session.status;
 
         // PreToolUse with None tool name should not change status
         session.apply_hook_event(HookEventType::PreToolUse, None);
@@ -1435,10 +1261,7 @@ mod tests {
         // (is_interactive_tool returns false for empty strings)
         session.apply_hook_event(HookEventType::PreToolUse, Some(""));
 
-        assert!(matches!(
-            session.status,
-            SessionStatus::RunningTool { ref tool_name, .. } if tool_name.is_empty()
-        ));
+        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
@@ -1463,5 +1286,31 @@ mod tests {
 
         let context_detail = ActivityDetail::with_context("Setup");
         assert_eq!(context_detail.display(), "Setup");
+    }
+
+    #[test]
+    fn test_new_session_status_variants() {
+        // All three states should exist
+        let idle = SessionStatus::Idle;
+        let working = SessionStatus::Working;
+        let attention = SessionStatus::AttentionNeeded;
+
+        assert_eq!(idle.label(), "idle");
+        assert_eq!(working.label(), "working");
+        assert_eq!(attention.label(), "needs input");
+    }
+
+    #[test]
+    fn test_session_status_should_blink() {
+        assert!(!SessionStatus::Idle.should_blink());
+        assert!(!SessionStatus::Working.should_blink());
+        assert!(SessionStatus::AttentionNeeded.should_blink());
+    }
+
+    #[test]
+    fn test_session_status_icons() {
+        assert_eq!(SessionStatus::Idle.icon(), "-");
+        assert_eq!(SessionStatus::Working.icon(), ">");
+        assert_eq!(SessionStatus::AttentionNeeded.icon(), "!");
     }
 }
