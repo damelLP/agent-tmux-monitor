@@ -262,6 +262,73 @@ impl fmt::Display for SessionStatus {
 }
 
 // ============================================================================
+// Activity Detail
+// ============================================================================
+
+/// Detailed information about current session activity.
+///
+/// Provides structured details alongside the simple SessionStatus enum.
+/// This separates "what state are we in" from "what specifically is happening".
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityDetail {
+    /// Tool name if running/waiting on a tool
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_name: Option<String>,
+    /// When the current activity started
+    pub started_at: DateTime<Utc>,
+    /// Additional context (e.g., "Compacting", "Setup", "Thinking")
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<String>,
+}
+
+impl ActivityDetail {
+    /// Creates a new ActivityDetail for a tool operation.
+    pub fn new(tool_name: &str) -> Self {
+        Self {
+            tool_name: Some(tool_name.to_string()),
+            started_at: Utc::now(),
+            context: None,
+        }
+    }
+
+    /// Creates an ActivityDetail with context but no specific tool.
+    pub fn with_context(context: &str) -> Self {
+        Self {
+            tool_name: None,
+            started_at: Utc::now(),
+            context: Some(context.to_string()),
+        }
+    }
+
+    /// Creates an ActivityDetail for "thinking" state.
+    pub fn thinking() -> Self {
+        Self::with_context("Thinking")
+    }
+
+    /// Returns how long this activity has been running.
+    pub fn duration(&self) -> chrono::Duration {
+        Utc::now().signed_duration_since(self.started_at)
+    }
+
+    /// Returns a display string for this activity.
+    pub fn display(&self) -> String {
+        if let Some(ref tool) = self.tool_name {
+            tool.clone()
+        } else if let Some(ref ctx) = self.context {
+            ctx.clone()
+        } else {
+            "Unknown".to_string()
+        }
+    }
+}
+
+impl Default for ActivityDetail {
+    fn default() -> Self {
+        Self::thinking()
+    }
+}
+
+// ============================================================================
 // Display State (UI Layer)
 // ============================================================================
 
@@ -1372,5 +1439,29 @@ mod tests {
             session.status,
             SessionStatus::RunningTool { ref tool_name, .. } if tool_name.is_empty()
         ));
+    }
+
+    #[test]
+    fn test_activity_detail_creation() {
+        let detail = ActivityDetail::new("Bash");
+        assert_eq!(detail.tool_name.as_deref(), Some("Bash"));
+        assert!(detail.started_at <= Utc::now());
+        assert!(detail.context.is_none());
+    }
+
+    #[test]
+    fn test_activity_detail_with_context() {
+        let detail = ActivityDetail::with_context("Compacting");
+        assert!(detail.tool_name.is_none());
+        assert_eq!(detail.context.as_deref(), Some("Compacting"));
+    }
+
+    #[test]
+    fn test_activity_detail_display() {
+        let detail = ActivityDetail::new("Read");
+        assert_eq!(detail.display(), "Read");
+
+        let context_detail = ActivityDetail::with_context("Setup");
+        assert_eq!(context_detail.display(), "Setup");
     }
 }
