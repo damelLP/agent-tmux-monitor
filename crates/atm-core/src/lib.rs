@@ -19,7 +19,7 @@ pub use agent::AgentType;
 pub use context::{ContextUsage, TokenCount};
 pub use cost::Money;
 pub use error::{DomainError, DomainResult};
-pub use hook::HookEventType;
+pub use hook::{is_interactive_tool, HookEventType};
 pub use model::Model;
 pub use session::{
     DisplayState, LinesChanged, SessionDomain, SessionDuration, SessionId, SessionInfrastructure,

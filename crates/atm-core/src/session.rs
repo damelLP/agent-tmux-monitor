@@ -1,5 +1,6 @@
 //! Session domain entities and value objects.
 
+use crate::hook::is_interactive_tool;
 use crate::{AgentType, ContextUsage, HookEventType, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -774,10 +775,17 @@ impl SessionDomain {
         match event_type {
             HookEventType::PreToolUse => {
                 if let Some(name) = tool_name {
-                    self.status = SessionStatus::RunningTool {
-                        tool_name: name.to_string(),
-                        started_at: Some(Utc::now()),
-                    };
+                    // Check if this is an interactive tool that waits for user input
+                    if is_interactive_tool(name) {
+                        self.status = SessionStatus::WaitingForPermission {
+                            tool_name: name.to_string(),
+                        };
+                    } else {
+                        self.status = SessionStatus::RunningTool {
+                            tool_name: name.to_string(),
+                            started_at: Some(Utc::now()),
+                        };
+                    }
                 }
             }
             HookEventType::PostToolUse => {
@@ -1191,6 +1199,11 @@ fn format_duration(duration: chrono::Duration) -> String {
 mod tests {
     use super::*;
 
+    /// Creates a test session with default values.
+    fn create_test_session(id: &str) -> SessionDomain {
+        SessionDomain::new(SessionId::new(id), AgentType::GeneralPurpose, Model::Opus45)
+    }
+
     #[test]
     fn test_session_id_short() {
         let id = SessionId::new("8e11bfb5-7dc2-432b-9206-928fa5c35731");
@@ -1284,5 +1297,80 @@ mod tests {
     fn test_session_id_pending_pid_returns_none_for_invalid_pid() {
         let id = SessionId::new("pending-not-a-number");
         assert_eq!(id.pending_pid(), None);
+    }
+
+    #[test]
+    fn test_apply_hook_event_interactive_tool() {
+        let mut session = create_test_session("test-interactive");
+
+        // PreToolUse with interactive tool → WaitingForPermission
+        session.apply_hook_event(HookEventType::PreToolUse, Some("AskUserQuestion"));
+
+        assert!(matches!(
+            session.status,
+            SessionStatus::WaitingForPermission { ref tool_name } if tool_name == "AskUserQuestion"
+        ));
+
+        // PostToolUse → back to Thinking
+        session.apply_hook_event(HookEventType::PostToolUse, None);
+        assert!(matches!(session.status, SessionStatus::Thinking));
+    }
+
+    #[test]
+    fn test_apply_hook_event_enter_plan_mode() {
+        let mut session = create_test_session("test-plan");
+
+        // EnterPlanMode is also interactive
+        session.apply_hook_event(HookEventType::PreToolUse, Some("EnterPlanMode"));
+
+        assert!(matches!(
+            session.status,
+            SessionStatus::WaitingForPermission { ref tool_name } if tool_name == "EnterPlanMode"
+        ));
+    }
+
+    #[test]
+    fn test_apply_hook_event_standard_tool() {
+        let mut session = create_test_session("test-standard");
+
+        // PreToolUse with standard tool → RunningTool
+        session.apply_hook_event(HookEventType::PreToolUse, Some("Bash"));
+
+        assert!(matches!(
+            session.status,
+            SessionStatus::RunningTool { ref tool_name, .. } if tool_name == "Bash"
+        ));
+
+        // PostToolUse → back to Thinking
+        session.apply_hook_event(HookEventType::PostToolUse, Some("Bash"));
+        assert!(matches!(session.status, SessionStatus::Thinking));
+    }
+
+    #[test]
+    fn test_apply_hook_event_none_tool_name() {
+        let mut session = create_test_session("test-none");
+        let original_status = session.status.clone();
+
+        // PreToolUse with None tool name should not change status
+        session.apply_hook_event(HookEventType::PreToolUse, None);
+
+        assert_eq!(
+            session.status, original_status,
+            "PreToolUse with None tool_name should not change status"
+        );
+    }
+
+    #[test]
+    fn test_apply_hook_event_empty_tool_name() {
+        let mut session = create_test_session("test-empty");
+
+        // Empty string tool name - should be treated as standard tool
+        // (is_interactive_tool returns false for empty strings)
+        session.apply_hook_event(HookEventType::PreToolUse, Some(""));
+
+        assert!(matches!(
+            session.status,
+            SessionStatus::RunningTool { ref tool_name, .. } if tool_name.is_empty()
+        ));
     }
 }

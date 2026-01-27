@@ -1,7 +1,33 @@
-//! Hook event types from Claude Code.
+//! Hook event types and tool classification from Claude Code.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+
+/// Returns true if the given tool name represents an interactive tool
+/// that requires user input.
+///
+/// Interactive tools pause execution and wait for user response:
+/// - `AskUserQuestion`: Prompts user with a question/options
+/// - `EnterPlanMode`: Enters planning mode, waits for user approval
+/// - `ExitPlanMode`: Presents plan for user approval
+///
+/// When these tools fire `PreToolUse`, the session should show the
+/// "needs input" indicator (blinking yellow !) rather than "running".
+///
+/// # Arguments
+/// * `tool_name` - The name of the tool from a PreToolUse hook event
+///
+/// # Returns
+/// `true` if the tool is interactive and needs user input, `false` otherwise.
+/// Returns `false` for empty or whitespace-only tool names.
+pub fn is_interactive_tool(tool_name: &str) -> bool {
+    let trimmed = tool_name.trim();
+    !trimmed.is_empty()
+        && matches!(
+            trimmed,
+            "AskUserQuestion" | "EnterPlanMode" | "ExitPlanMode"
+        )
+}
 
 /// Types of hook events from Claude Code.
 ///
@@ -79,5 +105,48 @@ mod tests {
         assert!(HookEventType::PreToolUse.is_pre_event());
         assert!(HookEventType::PostToolUse.is_post_event());
         assert!(!HookEventType::PreToolUse.is_post_event());
+    }
+
+    #[test]
+    fn test_is_interactive_tool() {
+        // Interactive tools should return true
+        assert!(is_interactive_tool("AskUserQuestion"));
+        assert!(is_interactive_tool("EnterPlanMode"));
+        assert!(is_interactive_tool("ExitPlanMode"));
+
+        // Standard tools should return false
+        assert!(!is_interactive_tool("Bash"));
+        assert!(!is_interactive_tool("Read"));
+        assert!(!is_interactive_tool("Write"));
+        assert!(!is_interactive_tool("Edit"));
+        assert!(!is_interactive_tool("WebSearch"));
+        assert!(!is_interactive_tool("Grep"));
+        assert!(!is_interactive_tool("Glob"));
+        assert!(!is_interactive_tool("Task"));
+    }
+
+    #[test]
+    fn test_is_interactive_tool_edge_cases() {
+        // Empty string should return false
+        assert!(!is_interactive_tool(""));
+
+        // Whitespace only should return false
+        assert!(!is_interactive_tool("   "));
+        assert!(!is_interactive_tool("\t"));
+        assert!(!is_interactive_tool("\n"));
+
+        // Case sensitivity - wrong case should return false
+        assert!(!is_interactive_tool("askuserquestion"));
+        assert!(!is_interactive_tool("ASKUSERQUESTION"));
+        assert!(!is_interactive_tool("AskUserquestion"));
+
+        // Partial matches should return false
+        assert!(!is_interactive_tool("AskUser"));
+        assert!(!is_interactive_tool("Question"));
+        assert!(!is_interactive_tool("EnterPlan"));
+
+        // Extra whitespace should be trimmed
+        assert!(is_interactive_tool("  AskUserQuestion  "));
+        assert!(is_interactive_tool("\tEnterPlanMode\n"));
     }
 }
