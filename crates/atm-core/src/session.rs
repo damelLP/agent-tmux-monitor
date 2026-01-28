@@ -4,6 +4,7 @@ use crate::hook::is_interactive_tool;
 use crate::{AgentType, ContextUsage, HookEventType, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::collections::VecDeque;
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -44,6 +45,7 @@ impl SessionId {
     }
 
     /// Checks if this is a pending session ID (not yet associated with real session).
+    #[must_use]
     pub fn is_pending(&self) -> bool {
         self.0.starts_with(PENDING_SESSION_PREFIX)
     }
@@ -68,6 +70,7 @@ impl SessionId {
     /// Returns a shortened display form (first 8 characters).
     ///
     /// Useful for compact TUI display.
+    #[must_use]
     pub fn short(&self) -> &str {
         self.0.get(..8).unwrap_or(&self.0)
     }
@@ -192,6 +195,7 @@ pub enum SessionStatus {
 
 impl SessionStatus {
     /// Returns the display label for this status.
+    #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -201,6 +205,7 @@ impl SessionStatus {
     }
 
     /// Returns the ASCII icon for this status.
+    #[must_use]
     pub fn icon(&self) -> &'static str {
         match self {
             Self::Idle => "-",
@@ -210,16 +215,19 @@ impl SessionStatus {
     }
 
     /// Returns true if this status should blink in the UI.
+    #[must_use]
     pub fn should_blink(&self) -> bool {
         matches!(self, Self::AttentionNeeded)
     }
 
     /// Returns true if the session is actively processing.
+    #[must_use]
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Working)
     }
 
     /// Returns true if user action is needed.
+    #[must_use]
     pub fn needs_attention(&self) -> bool {
         matches!(self, Self::AttentionNeeded)
     }
@@ -285,13 +293,16 @@ impl ActivityDetail {
     }
 
     /// Returns a display string for this activity.
-    pub fn display(&self) -> String {
+    ///
+    /// Returns a `Cow<str>` for zero-copy access when possible.
+    #[must_use]
+    pub fn display(&self) -> Cow<'_, str> {
         if let Some(ref tool) = self.tool_name {
-            tool.clone()
+            Cow::Borrowed(tool)
         } else if let Some(ref ctx) = self.context {
-            ctx.clone()
+            Cow::Borrowed(ctx)
         } else {
-            "Unknown".to_string()
+            Cow::Borrowed("Unknown")
         }
     }
 }
@@ -450,6 +461,51 @@ impl fmt::Display for LinesChanged {
 }
 
 // ============================================================================
+// Status Line Data Transfer Object
+// ============================================================================
+
+/// Data extracted from Claude Code's status line JSON.
+///
+/// This struct consolidates the many parameters previously passed to
+/// `SessionDomain::from_status_line()` and `update_from_status_line()`,
+/// providing named fields for clarity and reducing error-prone parameter ordering.
+#[derive(Debug, Clone, Default)]
+pub struct StatusLineData {
+    /// Session ID from Claude Code
+    pub session_id: String,
+    /// Model ID (e.g., "claude-sonnet-4-20250514")
+    pub model_id: String,
+    /// Total cost in USD
+    pub cost_usd: f64,
+    /// Total session duration in milliseconds
+    pub total_duration_ms: u64,
+    /// Time spent waiting for API responses in milliseconds
+    pub api_duration_ms: u64,
+    /// Lines of code added
+    pub lines_added: u64,
+    /// Lines of code removed
+    pub lines_removed: u64,
+    /// Total input tokens across all requests
+    pub total_input_tokens: u64,
+    /// Total output tokens across all responses
+    pub total_output_tokens: u64,
+    /// Context window size for the model
+    pub context_window_size: u32,
+    /// Input tokens in current context
+    pub current_input_tokens: u64,
+    /// Output tokens in current context
+    pub current_output_tokens: u64,
+    /// Tokens used for cache creation
+    pub cache_creation_tokens: u64,
+    /// Tokens read from cache
+    pub cache_read_tokens: u64,
+    /// Current working directory
+    pub cwd: Option<String>,
+    /// Claude Code version
+    pub version: Option<String>,
+}
+
+// ============================================================================
 // Domain Entity
 // ============================================================================
 
@@ -531,47 +587,29 @@ impl SessionDomain {
     }
 
     /// Creates a SessionDomain from Claude Code status line data.
-    #[allow(clippy::too_many_arguments)]
-    pub fn from_status_line(
-        session_id: &str,
-        model_id: &str,
-        cost_usd: f64,
-        total_duration_ms: u64,
-        api_duration_ms: u64,
-        lines_added: u64,
-        lines_removed: u64,
-        total_input_tokens: u64,
-        total_output_tokens: u64,
-        context_window_size: u32,
-        current_input_tokens: u64,
-        current_output_tokens: u64,
-        cache_creation_tokens: u64,
-        cache_read_tokens: u64,
-        cwd: Option<&str>,
-        version: Option<&str>,
-    ) -> Self {
-        let model = Model::from_id(model_id);
+    pub fn from_status_line(data: &StatusLineData) -> Self {
+        let model = Model::from_id(&data.model_id);
 
         let mut session = Self::new(
-            SessionId::new(session_id),
+            SessionId::new(&data.session_id),
             AgentType::GeneralPurpose, // Default, may be updated by hook events
             model,
         );
 
-        session.cost = Money::from_usd(cost_usd);
-        session.duration = SessionDuration::new(total_duration_ms, api_duration_ms);
-        session.lines_changed = LinesChanged::new(lines_added, lines_removed);
+        session.cost = Money::from_usd(data.cost_usd);
+        session.duration = SessionDuration::new(data.total_duration_ms, data.api_duration_ms);
+        session.lines_changed = LinesChanged::new(data.lines_added, data.lines_removed);
         session.context = ContextUsage {
-            total_input_tokens: TokenCount::new(total_input_tokens),
-            total_output_tokens: TokenCount::new(total_output_tokens),
-            context_window_size,
-            current_input_tokens: TokenCount::new(current_input_tokens),
-            current_output_tokens: TokenCount::new(current_output_tokens),
-            cache_creation_tokens: TokenCount::new(cache_creation_tokens),
-            cache_read_tokens: TokenCount::new(cache_read_tokens),
+            total_input_tokens: TokenCount::new(data.total_input_tokens),
+            total_output_tokens: TokenCount::new(data.total_output_tokens),
+            context_window_size: data.context_window_size,
+            current_input_tokens: TokenCount::new(data.current_input_tokens),
+            current_output_tokens: TokenCount::new(data.current_output_tokens),
+            cache_creation_tokens: TokenCount::new(data.cache_creation_tokens),
+            cache_read_tokens: TokenCount::new(data.cache_read_tokens),
         };
-        session.working_directory = cwd.map(|s| s.to_string());
-        session.claude_code_version = version.map(|s| s.to_string());
+        session.working_directory = data.cwd.clone();
+        session.claude_code_version = data.version.clone();
         session.last_activity = Utc::now();
 
         session
@@ -581,30 +619,16 @@ impl SessionDomain {
     ///
     /// When `current_usage` is null in Claude's status line, all current_* values
     /// will be 0, which correctly resets context percentage to 0%.
-    #[allow(clippy::too_many_arguments)]
-    pub fn update_from_status_line(
-        &mut self,
-        cost_usd: f64,
-        total_duration_ms: u64,
-        api_duration_ms: u64,
-        lines_added: u64,
-        lines_removed: u64,
-        total_input_tokens: u64,
-        total_output_tokens: u64,
-        current_input_tokens: u64,
-        current_output_tokens: u64,
-        cache_creation_tokens: u64,
-        cache_read_tokens: u64,
-    ) {
-        self.cost = Money::from_usd(cost_usd);
-        self.duration = SessionDuration::new(total_duration_ms, api_duration_ms);
-        self.lines_changed = LinesChanged::new(lines_added, lines_removed);
-        self.context.total_input_tokens = TokenCount::new(total_input_tokens);
-        self.context.total_output_tokens = TokenCount::new(total_output_tokens);
-        self.context.current_input_tokens = TokenCount::new(current_input_tokens);
-        self.context.current_output_tokens = TokenCount::new(current_output_tokens);
-        self.context.cache_creation_tokens = TokenCount::new(cache_creation_tokens);
-        self.context.cache_read_tokens = TokenCount::new(cache_read_tokens);
+    pub fn update_from_status_line(&mut self, data: &StatusLineData) {
+        self.cost = Money::from_usd(data.cost_usd);
+        self.duration = SessionDuration::new(data.total_duration_ms, data.api_duration_ms);
+        self.lines_changed = LinesChanged::new(data.lines_added, data.lines_removed);
+        self.context.total_input_tokens = TokenCount::new(data.total_input_tokens);
+        self.context.total_output_tokens = TokenCount::new(data.total_output_tokens);
+        self.context.current_input_tokens = TokenCount::new(data.current_input_tokens);
+        self.context.current_output_tokens = TokenCount::new(data.current_output_tokens);
+        self.context.cache_creation_tokens = TokenCount::new(data.cache_creation_tokens);
+        self.context.cache_read_tokens = TokenCount::new(data.cache_read_tokens);
         self.last_activity = Utc::now();
 
         // Status line update means Claude is working
@@ -1031,7 +1055,7 @@ impl SessionView {
             model: session.model.display_name().to_string(),
             status: session.status,
             status_label: session.status.label().to_string(),
-            activity_detail: session.current_activity.as_ref().map(|a| a.display()),
+            activity_detail: session.current_activity.as_ref().map(|a| a.display().into_owned()),
             should_blink: session.status.should_blink(),
             status_icon: session.status.icon().to_string(),
             context_percentage: session.context.usage_percentage(),
@@ -1198,8 +1222,8 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
-            session.current_activity.as_ref().map(|a| a.display()),
-            Some("AskUserQuestion".to_string())
+            session.current_activity.as_ref().map(|a| a.display()).as_deref(),
+            Some("AskUserQuestion")
         );
 
         // PostToolUse → back to Working (thinking)
@@ -1216,8 +1240,8 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
-            session.current_activity.as_ref().map(|a| a.display()),
-            Some("EnterPlanMode".to_string())
+            session.current_activity.as_ref().map(|a| a.display()).as_deref(),
+            Some("EnterPlanMode")
         );
     }
 
@@ -1230,8 +1254,8 @@ mod tests {
 
         assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
-            session.current_activity.as_ref().map(|a| a.display()),
-            Some("Bash".to_string())
+            session.current_activity.as_ref().map(|a| a.display()).as_deref(),
+            Some("Bash")
         );
 
         // PostToolUse → still Working (thinking)

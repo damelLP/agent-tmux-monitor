@@ -20,6 +20,7 @@ use std::fmt;
 /// # Returns
 /// `true` if the tool is interactive and needs user input, `false` otherwise.
 /// Returns `false` for empty or whitespace-only tool names.
+#[must_use]
 pub fn is_interactive_tool(tool_name: &str) -> bool {
     let trimmed = tool_name.trim();
     !trimmed.is_empty()
@@ -28,6 +29,23 @@ pub fn is_interactive_tool(tool_name: &str) -> bool {
             "AskUserQuestion" | "EnterPlanMode" | "ExitPlanMode"
         )
 }
+
+/// All HookEventType variants paired with their string names.
+/// Single source of truth for string conversion.
+const HOOK_EVENT_VARIANTS: &[(HookEventType, &str)] = &[
+    (HookEventType::PreToolUse, "PreToolUse"),
+    (HookEventType::PostToolUse, "PostToolUse"),
+    (HookEventType::PostToolUseFailure, "PostToolUseFailure"),
+    (HookEventType::UserPromptSubmit, "UserPromptSubmit"),
+    (HookEventType::Stop, "Stop"),
+    (HookEventType::SubagentStart, "SubagentStart"),
+    (HookEventType::SubagentStop, "SubagentStop"),
+    (HookEventType::SessionStart, "SessionStart"),
+    (HookEventType::SessionEnd, "SessionEnd"),
+    (HookEventType::PreCompact, "PreCompact"),
+    (HookEventType::Setup, "Setup"),
+    (HookEventType::Notification, "Notification"),
+];
 
 /// Types of hook events from Claude Code.
 ///
@@ -73,7 +91,24 @@ pub enum HookEventType {
 }
 
 impl HookEventType {
+    /// Returns the canonical string name for this event type.
+    ///
+    /// This is the single source of truth for event name strings,
+    /// used by both `from_event_name()` and `Display`.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        // Use the constant array as single source of truth
+        for (variant, name) in HOOK_EVENT_VARIANTS {
+            if variant == self {
+                return name;
+            }
+        }
+        // This is unreachable if HOOK_EVENT_VARIANTS is complete
+        "Unknown"
+    }
+
     /// Returns true if this is a pre-execution event.
+    #[must_use]
     pub fn is_pre_event(&self) -> bool {
         matches!(
             self,
@@ -82,6 +117,7 @@ impl HookEventType {
     }
 
     /// Returns true if this is a post-execution event.
+    #[must_use]
     pub fn is_post_event(&self) -> bool {
         matches!(
             self,
@@ -94,41 +130,20 @@ impl HookEventType {
     }
 
     /// Parses from a hook event name string.
+    ///
+    /// Uses the `HOOK_EVENT_VARIANTS` constant as single source of truth.
+    #[must_use]
     pub fn from_event_name(name: &str) -> Option<Self> {
-        match name {
-            "PreToolUse" => Some(Self::PreToolUse),
-            "PostToolUse" => Some(Self::PostToolUse),
-            "PostToolUseFailure" => Some(Self::PostToolUseFailure),
-            "UserPromptSubmit" => Some(Self::UserPromptSubmit),
-            "Stop" => Some(Self::Stop),
-            "SubagentStart" => Some(Self::SubagentStart),
-            "SubagentStop" => Some(Self::SubagentStop),
-            "SessionStart" => Some(Self::SessionStart),
-            "SessionEnd" => Some(Self::SessionEnd),
-            "PreCompact" => Some(Self::PreCompact),
-            "Setup" => Some(Self::Setup),
-            "Notification" => Some(Self::Notification),
-            _ => None,
-        }
+        HOOK_EVENT_VARIANTS
+            .iter()
+            .find(|(_, s)| *s == name)
+            .map(|(v, _)| *v)
     }
 }
 
 impl fmt::Display for HookEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::PreToolUse => write!(f, "PreToolUse"),
-            Self::PostToolUse => write!(f, "PostToolUse"),
-            Self::PostToolUseFailure => write!(f, "PostToolUseFailure"),
-            Self::UserPromptSubmit => write!(f, "UserPromptSubmit"),
-            Self::Stop => write!(f, "Stop"),
-            Self::SubagentStart => write!(f, "SubagentStart"),
-            Self::SubagentStop => write!(f, "SubagentStop"),
-            Self::SessionStart => write!(f, "SessionStart"),
-            Self::SessionEnd => write!(f, "SessionEnd"),
-            Self::PreCompact => write!(f, "PreCompact"),
-            Self::Setup => write!(f, "Setup"),
-            Self::Notification => write!(f, "Notification"),
-        }
+        f.write_str(self.as_str())
     }
 }
 

@@ -2,7 +2,7 @@
 //!
 //! Based on validated integration testing (Week 1).
 
-use atm_core::{HookEventType, SessionDomain, SessionId};
+use atm_core::{HookEventType, SessionDomain, SessionId, StatusLineData};
 use serde::Deserialize;
 
 /// Raw status line JSON structure from Claude Code.
@@ -98,34 +98,40 @@ pub struct RawCurrentUsage {
 }
 
 impl RawStatusLine {
-    /// Converts to SessionDomain.
+    /// Converts raw JSON data to a StatusLineData struct.
+    ///
     /// Returns None if required fields (model) are missing.
-    pub fn to_session_domain(&self) -> Option<SessionDomain> {
-        // Model is required to create a new session
+    pub fn to_status_line_data(&self) -> Option<StatusLineData> {
         let model = self.model.as_ref()?;
-
         let cost = self.cost.as_ref();
         let context = self.context_window.as_ref();
         let current = context.and_then(|c| c.current_usage.as_ref());
 
-        Some(SessionDomain::from_status_line(
-            &self.session_id,
-            &model.id,
-            cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
-            cost.map(|c| c.total_duration_ms).unwrap_or(0),
-            cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
-            cost.map(|c| c.total_lines_added).unwrap_or(0),
-            cost.map(|c| c.total_lines_removed).unwrap_or(0),
-            context.map(|c| c.total_input_tokens).unwrap_or(0),
-            context.map(|c| c.total_output_tokens).unwrap_or(0),
-            context.map(|c| c.context_window_size).unwrap_or(200_000),
-            current.map(|c| c.input_tokens).unwrap_or(0),
-            current.map(|c| c.output_tokens).unwrap_or(0),
-            current.map(|c| c.cache_creation_input_tokens).unwrap_or(0),
-            current.map(|c| c.cache_read_input_tokens).unwrap_or(0),
-            self.cwd.as_deref(),
-            self.version.as_deref(),
-        ))
+        Some(StatusLineData {
+            session_id: self.session_id.clone(),
+            model_id: model.id.clone(),
+            cost_usd: cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
+            total_duration_ms: cost.map(|c| c.total_duration_ms).unwrap_or(0),
+            api_duration_ms: cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
+            lines_added: cost.map(|c| c.total_lines_added).unwrap_or(0),
+            lines_removed: cost.map(|c| c.total_lines_removed).unwrap_or(0),
+            total_input_tokens: context.map(|c| c.total_input_tokens).unwrap_or(0),
+            total_output_tokens: context.map(|c| c.total_output_tokens).unwrap_or(0),
+            context_window_size: context.map(|c| c.context_window_size).unwrap_or(200_000),
+            current_input_tokens: current.map(|c| c.input_tokens).unwrap_or(0),
+            current_output_tokens: current.map(|c| c.output_tokens).unwrap_or(0),
+            cache_creation_tokens: current.map(|c| c.cache_creation_input_tokens).unwrap_or(0),
+            cache_read_tokens: current.map(|c| c.cache_read_input_tokens).unwrap_or(0),
+            cwd: self.cwd.clone(),
+            version: self.version.clone(),
+        })
+    }
+
+    /// Converts to SessionDomain.
+    /// Returns None if required fields (model) are missing.
+    pub fn to_session_domain(&self) -> Option<SessionDomain> {
+        let data = self.to_status_line_data()?;
+        Some(SessionDomain::from_status_line(&data))
     }
 
     /// Updates an existing SessionDomain with new data.
@@ -133,28 +139,36 @@ impl RawStatusLine {
     pub fn update_session(&self, session: &mut SessionDomain) {
         use atm_core::Model;
 
-        let cost = self.cost.as_ref();
-        let context = self.context_window.as_ref();
-        let current = context.and_then(|c| c.current_usage.as_ref());
-
         // Update model if present (fills in Unknown for discovered/hook-created sessions)
         if let Some(model) = &self.model {
             session.model = Model::from_id(&model.id);
         }
 
-        session.update_from_status_line(
-            cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
-            cost.map(|c| c.total_duration_ms).unwrap_or(0),
-            cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
-            cost.map(|c| c.total_lines_added).unwrap_or(0),
-            cost.map(|c| c.total_lines_removed).unwrap_or(0),
-            context.map(|c| c.total_input_tokens).unwrap_or(0),
-            context.map(|c| c.total_output_tokens).unwrap_or(0),
-            current.map(|c| c.input_tokens).unwrap_or(0),
-            current.map(|c| c.output_tokens).unwrap_or(0),
-            current.map(|c| c.cache_creation_input_tokens).unwrap_or(0),
-            current.map(|c| c.cache_read_input_tokens).unwrap_or(0),
-        );
+        // Build StatusLineData for the update (model_id not used in update)
+        let cost = self.cost.as_ref();
+        let context = self.context_window.as_ref();
+        let current = context.and_then(|c| c.current_usage.as_ref());
+
+        let data = StatusLineData {
+            session_id: self.session_id.clone(),
+            model_id: String::new(), // Not used in update
+            cost_usd: cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
+            total_duration_ms: cost.map(|c| c.total_duration_ms).unwrap_or(0),
+            api_duration_ms: cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
+            lines_added: cost.map(|c| c.total_lines_added).unwrap_or(0),
+            lines_removed: cost.map(|c| c.total_lines_removed).unwrap_or(0),
+            total_input_tokens: context.map(|c| c.total_input_tokens).unwrap_or(0),
+            total_output_tokens: context.map(|c| c.total_output_tokens).unwrap_or(0),
+            context_window_size: context.map(|c| c.context_window_size).unwrap_or(200_000),
+            current_input_tokens: current.map(|c| c.input_tokens).unwrap_or(0),
+            current_output_tokens: current.map(|c| c.output_tokens).unwrap_or(0),
+            cache_creation_tokens: current.map(|c| c.cache_creation_input_tokens).unwrap_or(0),
+            cache_read_tokens: current.map(|c| c.cache_read_input_tokens).unwrap_or(0),
+            cwd: self.cwd.clone(),
+            version: self.version.clone(),
+        };
+
+        session.update_from_status_line(&data);
     }
 }
 

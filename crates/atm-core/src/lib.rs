@@ -23,5 +23,6 @@ pub use hook::{is_interactive_tool, HookEventType};
 pub use model::Model;
 pub use session::{
     ActivityDetail, LinesChanged, SessionDomain, SessionDuration, SessionId,
-    SessionInfrastructure, SessionStatus, SessionView, ToolUseId, ToolUsageRecord, TranscriptPath,
+    SessionInfrastructure, SessionStatus, SessionView, StatusLineData, ToolUseId, ToolUsageRecord,
+    TranscriptPath,
 };
