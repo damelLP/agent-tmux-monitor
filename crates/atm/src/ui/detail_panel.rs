@@ -142,15 +142,6 @@ fn build_detail_lines_inline(session: &SessionView) -> Vec<Line<'static>> {
     }
 
     // Warnings
-    if session.is_stale {
-        lines.push(Line::from(vec![Span::styled(
-            "  ! Session appears stale",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::ITALIC),
-        )]));
-    }
-
     if session.needs_attention {
         lines.push(Line::from(vec![Span::styled(
             "  ! Waiting for input",

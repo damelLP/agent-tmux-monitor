@@ -33,7 +33,7 @@ mod actor;
 mod commands;
 mod handle;
 
-pub use actor::{RegistryActor, MAX_SESSIONS, STALE_THRESHOLD_SECS};
+pub use actor::{RegistryActor, MAX_SESSIONS};
 pub use commands::{RegistryCommand, RegistryError, RemovalReason, SessionEvent};
 pub use handle::RegistryHandle;
 

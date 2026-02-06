@@ -174,8 +174,6 @@ impl AsRef<Path> for TranscriptPath {
 /// - **Idle**: Nothing happening - Claude finished, waiting for user
 /// - **Working**: Claude is actively processing - user just waits
 /// - **AttentionNeeded**: User must act for session to proceed
-///
-/// Staleness is NOT a status - it's a computed property via `is_stale()`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionStatus {
@@ -727,13 +725,6 @@ impl SessionDomain {
         Utc::now().signed_duration_since(self.last_activity)
     }
 
-    /// Returns true if the session should be considered stale.
-    ///
-    /// A session is stale if no activity for 8 hours.
-    pub fn is_stale(&self) -> bool {
-        self.time_since_activity() > chrono::Duration::hours(8)
-    }
-
     /// Returns true if context usage needs attention.
     pub fn needs_context_attention(&self) -> bool {
         self.context.is_warning() || self.context.is_critical()
@@ -1019,9 +1010,6 @@ pub struct SessionView {
     /// Working directory (shortened for display)
     pub working_directory: Option<String>,
 
-    /// Whether session is stale
-    pub is_stale: bool,
-
     /// Whether session needs attention (permission wait, high context)
     pub needs_attention: bool,
 
@@ -1075,7 +1063,6 @@ impl SessionView {
                     p
                 }
             }),
-            is_stale: session.is_stale(),
             needs_attention: session.status.needs_attention() || session.needs_context_attention(),
             last_activity_display: format_duration(since_activity),
             age_display: format_duration(age),

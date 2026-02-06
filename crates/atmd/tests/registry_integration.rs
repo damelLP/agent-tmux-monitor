@@ -358,10 +358,9 @@ async fn test_cleanup_fresh_sessions_not_removed() {
     );
 }
 
-// Note: Testing actual stale session cleanup requires sessions with old
-// last_activity timestamps. The production code uses Utc::now() internally,
-// making it difficult to test stale cleanup without time mocking.
-// The unit tests in actor.rs provide coverage for the cleanup logic.
+// Note: Testing dead-process cleanup requires sessions with real PIDs
+// that have terminated. The unit tests in actor.rs provide coverage
+// for the cleanup logic using synthetic PIDs.
 
 // ============================================================================
 // Concurrent Access Tests
@@ -765,7 +764,6 @@ async fn test_session_view_fields() {
     assert_eq!(view.agent_type, "explore");
     assert_eq!(view.model, "Opus 4.5");
     assert_eq!(view.status_label, "idle"); // New sessions start as Idle
-    assert!(!view.is_stale);
     assert!(!view.needs_attention);
 }
 
@@ -774,7 +772,7 @@ async fn test_session_view_fields() {
 // ============================================================================
 
 #[tokio::test]
-async fn test_cleanup_stale_is_fire_and_forget() {
+async fn test_cleanup_dead_processes_is_fire_and_forget() {
     let handle = spawn_registry();
 
     // cleanup_stale should complete quickly without waiting for result

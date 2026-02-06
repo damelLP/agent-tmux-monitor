@@ -29,9 +29,6 @@ use super::commands::{RegistryCommand, RegistryError, RemovalReason, SessionEven
 /// Maximum number of sessions the registry can hold.
 pub const MAX_SESSIONS: usize = 100;
 
-/// Threshold in seconds after which a session is considered stale.
-pub const STALE_THRESHOLD_SECS: i64 = 8 * 60 * 60; // 8 hours
-
 // ============================================================================
 // Registry Actor
 // ============================================================================
@@ -760,45 +757,38 @@ impl RegistryActor {
         Ok(())
     }
 
-    /// Handles cleanup of stale sessions and dead processes.
+    /// Handles cleanup of dead-process sessions.
     ///
-    /// Removes sessions that are:
-    /// - Stale: No activity for 8+ hours
-    /// - Dead: The Claude Code process has terminated
+    /// Removes sessions whose Claude Code process has terminated
+    /// (PID no longer exists or was reused by a different process).
     fn handle_cleanup_stale(&mut self) {
         let now = Utc::now();
 
-        // Collect PIDs to remove with their removal reason and session details
-        let to_remove: Vec<(u32, SessionId, RemovalReason)> = self
+        // Collect PIDs to remove: only sessions whose process has died
+        let to_remove: Vec<(u32, SessionId)> = self
             .sessions_by_pid
             .iter()
             .filter_map(|(pid, (session, infra))| {
-                // Check if session is stale (8+ hours no activity)
-                if session.is_stale() {
-                    return Some((*pid, session.id.clone(), RemovalReason::Stale));
-                }
-
-                // Check if process has died (PID no longer exists or was reused)
                 if !infra.is_process_alive() {
-                    return Some((*pid, session.id.clone(), RemovalReason::ProcessDied));
+                    Some((*pid, session.id.clone()))
+                } else {
+                    None
                 }
-
-                None
             })
             .collect();
 
         if to_remove.is_empty() {
-            debug!("No stale or dead sessions to clean up");
+            debug!("No dead-process sessions to clean up");
             return;
         }
 
         info!(
             count = to_remove.len(),
-            "Cleaning up stale/dead sessions"
+            "Cleaning up dead-process sessions"
         );
 
         // Remove each session
-        for (pid, session_id, reason) in to_remove {
+        for (pid, session_id) in to_remove {
             // Get details for logging
             let log_details = self
                 .sessions_by_pid
@@ -815,7 +805,7 @@ impl RegistryActor {
             // Use warn! so it shows up without RUST_LOG=debug
             warn!(
                 session_id = %session_id,
-                reason = %reason,
+                reason = %RemovalReason::ProcessDied,
                 details = %log_details,
                 "Session removed by cleanup"
             );
@@ -823,7 +813,7 @@ impl RegistryActor {
             // Publish removed event
             let _ = self.event_publisher.send(SessionEvent::Removed {
                 session_id,
-                reason,
+                reason: RemovalReason::ProcessDied,
             });
         }
     }

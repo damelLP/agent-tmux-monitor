@@ -99,7 +99,7 @@ mod tests {
             duration_seconds: 300.0,
             lines_display: "+100 -20".to_string(),
             working_directory: Some("/home/user/project".to_string()),
-            is_stale: false,
+
             needs_attention: false,
             last_activity_display: "10s ago".to_string(),
             age_display: "5m ago".to_string(),

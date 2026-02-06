@@ -116,10 +116,10 @@ pub enum RegistryCommand {
         respond_to: oneshot::Sender<Result<(), RegistryError>>,
     },
 
-    /// Trigger cleanup of stale sessions.
+    /// Trigger cleanup of dead-process sessions.
     ///
     /// This is a fire-and-forget command used by the cleanup task.
-    /// Sessions with no activity for 8+ hours are removed.
+    /// Sessions whose Claude Code process has died are removed.
     CleanupStale,
 
     /// Register a discovered session (minimal data from /proc scan).
@@ -227,9 +227,6 @@ pub enum RemovalReason {
     /// Client explicitly requested removal.
     Explicit,
 
-    /// Session had no activity for 8+ hours.
-    Stale,
-
     /// Removed to make room for new sessions when registry was full.
     RegistryFull,
 
@@ -249,7 +246,6 @@ impl std::fmt::Display for RemovalReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Explicit => write!(f, "explicitly removed"),
-            Self::Stale => write!(f, "no activity for 8+ hours"),
             Self::RegistryFull => write!(f, "registry capacity reached"),
             Self::SessionEnded => write!(f, "session ended by Claude Code"),
             Self::ProcessDied => write!(f, "process died without SessionEnd"),
@@ -292,10 +288,6 @@ mod tests {
     fn test_removal_reason_display() {
         assert_eq!(RemovalReason::Explicit.to_string(), "explicitly removed");
         assert_eq!(
-            RemovalReason::Stale.to_string(),
-            "no activity for 8+ hours"
-        );
-        assert_eq!(
             RemovalReason::RegistryFull.to_string(),
             "registry capacity reached"
         );
@@ -330,7 +322,7 @@ mod tests {
 
         let removed = SessionEvent::Removed {
             session_id: SessionId::new("test-3"),
-            reason: RemovalReason::Stale,
+            reason: RemovalReason::ProcessDied,
         };
         let _cloned = removed.clone();
     }
