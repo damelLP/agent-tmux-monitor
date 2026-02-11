@@ -110,6 +110,7 @@ impl RawStatusLine {
         Some(StatusLineData {
             session_id: self.session_id.clone(),
             model_id: model.id.clone(),
+            model_display_name: model.display_name.clone(),
             cost_usd: cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
             total_duration_ms: cost.map(|c| c.total_duration_ms).unwrap_or(0),
             api_duration_ms: cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
@@ -141,7 +142,20 @@ impl RawStatusLine {
 
         // Update model if present (fills in Unknown for discovered/hook-created sessions)
         if let Some(model) = &self.model {
-            session.model = Model::from_id(&model.id);
+            let parsed = Model::from_id(&model.id);
+            session.model = parsed;
+
+            // For unknown models, store display name fallback
+            if parsed.is_unknown() && !model.id.is_empty() {
+                session.model_display_override = Some(
+                    model
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| atm_core::derive_display_name(&model.id)),
+                );
+            } else {
+                session.model_display_override = None;
+            }
         }
 
         // Build StatusLineData for the update (model_id not used in update)
@@ -152,6 +166,7 @@ impl RawStatusLine {
         let data = StatusLineData {
             session_id: self.session_id.clone(),
             model_id: String::new(), // Not used in update
+            model_display_name: None, // Not used in update
             cost_usd: cost.map(|c| c.total_cost_usd).unwrap_or(0.0),
             total_duration_ms: cost.map(|c| c.total_duration_ms).unwrap_or(0),
             api_duration_ms: cost.map(|c| c.total_api_duration_ms).unwrap_or(0),
@@ -478,6 +493,85 @@ mod tests {
 
         // Model should now be filled in
         assert_eq!(session.model, Model::Opus45);
+        // Known model should not have a display override
+        assert!(session.model_display_override.is_none());
+    }
+
+    #[test]
+    fn test_update_session_unknown_model_with_display_name() {
+        use atm_core::{AgentType, SessionDomain};
+
+        let mut session = SessionDomain::new(
+            atm_core::SessionId::new("test-non-anthropic"),
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+        );
+
+        // Non-Anthropic model with display_name
+        let json = r#"{
+            "session_id": "test-non-anthropic",
+            "model": {"id": "gpt-4o", "display_name": "GPT-4o"}
+        }"#;
+
+        let raw: RawStatusLine = serde_json::from_str(json).unwrap();
+        raw.update_session(&mut session);
+
+        assert_eq!(session.model, Model::Unknown);
+        assert_eq!(session.model_display_override.as_deref(), Some("GPT-4o"));
+    }
+
+    #[test]
+    fn test_update_session_unknown_model_without_display_name() {
+        use atm_core::{AgentType, SessionDomain};
+
+        let mut session = SessionDomain::new(
+            atm_core::SessionId::new("test-unknown"),
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+        );
+
+        // Unknown model without display_name - should derive from ID
+        let json = r#"{
+            "session_id": "test-unknown",
+            "model": {"id": "gemini-1.5-pro"}
+        }"#;
+
+        let raw: RawStatusLine = serde_json::from_str(json).unwrap();
+        raw.update_session(&mut session);
+
+        assert_eq!(session.model, Model::Unknown);
+        assert_eq!(
+            session.model_display_override.as_deref(),
+            Some("gemini-1.5-pro")
+        );
+    }
+
+    #[test]
+    fn test_new_session_opus46() {
+        let json = r#"{
+            "session_id": "test-opus46",
+            "model": {"id": "claude-opus-4-6"}
+        }"#;
+
+        let raw: RawStatusLine = serde_json::from_str(json).unwrap();
+        let session = raw.to_session_domain().expect("should create session");
+
+        assert_eq!(session.model, Model::Opus46);
+        assert!(session.model_display_override.is_none());
+    }
+
+    #[test]
+    fn test_new_session_non_anthropic_model() {
+        let json = r#"{
+            "session_id": "test-gpt",
+            "model": {"id": "gpt-4o", "display_name": "GPT-4o"}
+        }"#;
+
+        let raw: RawStatusLine = serde_json::from_str(json).unwrap();
+        let session = raw.to_session_domain().expect("should create session");
+
+        assert_eq!(session.model, Model::Unknown);
+        assert_eq!(session.model_display_override.as_deref(), Some("GPT-4o"));
     }
 
     #[test]

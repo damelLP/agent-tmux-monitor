@@ -473,6 +473,8 @@ pub struct StatusLineData {
     pub session_id: String,
     /// Model ID (e.g., "claude-sonnet-4-20250514")
     pub model_id: String,
+    /// Display name from the provider (e.g., "Claude Opus 4.6"), if provided
+    pub model_display_name: Option<String>,
     /// Total cost in USD
     pub cost_usd: f64,
     /// Total session duration in milliseconds
@@ -524,6 +526,12 @@ pub struct SessionDomain {
     /// Claude model being used
     pub model: Model,
 
+    /// Display name override for unknown/non-Anthropic models.
+    /// When `model` is `Unknown`, this holds the raw model ID or
+    /// the provider-supplied display name for UI rendering.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_display_override: Option<String>,
+
     /// Current session status (3-state model)
     pub status: SessionStatus,
 
@@ -570,6 +578,7 @@ impl SessionDomain {
             id,
             agent_type,
             model,
+            model_display_override: None,
             status: SessionStatus::Idle,
             current_activity: None,
             context: ContextUsage::new(model.context_window_size()),
@@ -586,6 +595,8 @@ impl SessionDomain {
 
     /// Creates a SessionDomain from Claude Code status line data.
     pub fn from_status_line(data: &StatusLineData) -> Self {
+        use crate::model::derive_display_name;
+
         let model = Model::from_id(&data.model_id);
 
         let mut session = Self::new(
@@ -593,6 +604,16 @@ impl SessionDomain {
             AgentType::GeneralPurpose, // Default, may be updated by hook events
             model,
         );
+
+        // For unknown models, store a display name fallback:
+        // prefer provider-supplied display_name, then derive from raw ID
+        if model.is_unknown() && !data.model_id.is_empty() {
+            session.model_display_override = Some(
+                data.model_display_name
+                    .clone()
+                    .unwrap_or_else(|| derive_display_name(&data.model_id)),
+            );
+        }
 
         session.cost = Money::from_usd(data.cost_usd);
         session.duration = SessionDuration::new(data.total_duration_ms, data.api_duration_ms);
@@ -1040,7 +1061,14 @@ impl SessionView {
             id: session.id.clone(),
             id_short: session.id.short().to_string(),
             agent_type: session.agent_type.short_name().to_string(),
-            model: session.model.display_name().to_string(),
+            model: if session.model.is_unknown() {
+                session
+                    .model_display_override
+                    .clone()
+                    .unwrap_or_else(|| session.model.display_name().to_string())
+            } else {
+                session.model.display_name().to_string()
+            },
             status: session.status,
             status_label: session.status.label().to_string(),
             activity_detail: session.current_activity.as_ref().map(|a| a.display().into_owned()),
@@ -1150,6 +1178,45 @@ mod tests {
         assert_eq!(view.id_short, "8e11bfb5");
         assert_eq!(view.agent_type, "explore");
         assert_eq!(view.model, "Sonnet 4");
+    }
+
+    #[test]
+    fn test_session_view_unknown_model_with_override() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test-override"),
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+        );
+        session.model_display_override = Some("GPT-4o".to_string());
+
+        let view = SessionView::from_domain(&session);
+        assert_eq!(view.model, "GPT-4o");
+    }
+
+    #[test]
+    fn test_session_view_unknown_model_without_override() {
+        let session = SessionDomain::new(
+            SessionId::new("test-no-override"),
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+        );
+
+        let view = SessionView::from_domain(&session);
+        assert_eq!(view.model, "Unknown");
+    }
+
+    #[test]
+    fn test_session_view_known_model_ignores_override() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test-known"),
+            AgentType::GeneralPurpose,
+            Model::Opus46,
+        );
+        // Even if override is set, known models use their display_name
+        session.model_display_override = Some("something else".to_string());
+
+        let view = SessionView::from_domain(&session);
+        assert_eq!(view.model, "Opus 4.6");
     }
 
     #[test]

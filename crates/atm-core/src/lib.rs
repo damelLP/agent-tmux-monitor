@@ -20,7 +20,7 @@ pub use context::{ContextUsage, TokenCount};
 pub use cost::Money;
 pub use error::{DomainError, DomainResult};
 pub use hook::{is_interactive_tool, HookEventType};
-pub use model::Model;
+pub use model::{derive_display_name, Model};
 pub use session::{
     ActivityDetail, LinesChanged, SessionDomain, SessionDuration, SessionId,
     SessionInfrastructure, SessionStatus, SessionView, StatusLineData, ToolUseId, ToolUsageRecord,
