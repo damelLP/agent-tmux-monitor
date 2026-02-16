@@ -1,7 +1,8 @@
 //! Help popup overlay showing all keybindings.
 //!
 //! Renders a centered popup on top of the existing layout, listing
-//! available keyboard shortcuts grouped by category.
+//! available keyboard shortcuts grouped by category. Content is derived
+//! from [`KEYBINDING_HINTS`] in `keybinding.rs`.
 
 use ratatui::{
     layout::Rect,
@@ -10,6 +11,8 @@ use ratatui::{
     widgets::{Block, Borders, Clear, Paragraph},
     Frame,
 };
+
+use crate::keybinding::{HintCategory, KEYBINDING_HINTS};
 
 use super::layout::centered_popup;
 
@@ -34,70 +37,29 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
 
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled("  Navigation", heading_style)),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("    j / \u{2193}   ", key_style),
-            Span::raw("Move down"),
-        ]),
-        Line::from(vec![
-            Span::styled("    k / \u{2191}   ", key_style),
-            Span::raw("Move up"),
-        ]),
-        Line::from(vec![
-            Span::styled("    0 / gg  ", key_style),
-            Span::raw("Go to top"),
-        ]),
-        Line::from(vec![
-            Span::styled("    G       ", key_style),
-            Span::raw("Go to bottom"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Ngg     ", key_style),
-            Span::raw("Go to row N"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Nj / Nk ", key_style),
-            Span::raw("Move N rows"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Ctrl-d  ", key_style),
-            Span::raw("Half page down"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Ctrl-u  ", key_style),
-            Span::raw("Half page up"),
-        ]),
-        Line::from(""),
-        Line::from(Span::styled("  Actions", heading_style)),
-        Line::from(""),
-        Line::from(vec![
-            Span::styled("    Enter   ", key_style),
-            Span::raw("Jump to session (tmux)"),
-        ]),
-        Line::from(vec![
-            Span::styled("    r       ", key_style),
-            Span::raw("Rescan / refresh"),
-        ]),
-        Line::from(vec![
-            Span::styled("    ?       ", key_style),
-            Span::raw("Toggle this help"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Esc     ", key_style),
-            Span::raw("Close help / quit"),
-        ]),
-        Line::from(vec![
-            Span::styled("    q       ", key_style),
-            Span::raw("Quit"),
-        ]),
-        Line::from(vec![
-            Span::styled("    Ctrl-c  ", key_style),
-            Span::raw("Quit"),
-        ]),
-    ];
+    let mut lines = vec![Line::from("")];
+    let mut current_category = None;
+
+    for entry in KEYBINDING_HINTS {
+        // Insert category heading when category changes
+        if current_category != Some(entry.category) {
+            if current_category.is_some() {
+                lines.push(Line::from(""));
+            }
+            let heading = match entry.category {
+                HintCategory::Navigation => "  Navigation",
+                HintCategory::Actions => "  Actions",
+            };
+            lines.push(Line::from(Span::styled(heading, heading_style)));
+            lines.push(Line::from(""));
+            current_category = Some(entry.category);
+        }
+
+        lines.push(Line::from(vec![
+            Span::styled(format!("    {:<11} ", entry.help_key), key_style),
+            Span::raw(entry.help_desc),
+        ]));
+    }
 
     let popup = Paragraph::new(lines).block(
         Block::default()
