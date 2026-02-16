@@ -64,20 +64,16 @@ impl AppLayout {
 /// The popup occupies `percent_x`% of the width and `percent_y`% of the height,
 /// centered in `area`. Percentages are clamped to 100.
 ///
-/// Uses saturating arithmetic throughout to avoid panics on edge-case inputs.
+/// Uses clamping and saturating arithmetic so that the computed popup rectangle
+/// remains within the given area and within the valid `u16` range, even for
+/// extreme or degenerate inputs.
 #[must_use]
 pub fn centered_popup(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let px = percent_x.min(100);
     let py = percent_y.min(100);
 
-    let popup_width = (area.width as u32)
-        .saturating_mul(px as u32)
-        .checked_div(100)
-        .unwrap_or(0) as u16;
-    let popup_height = (area.height as u32)
-        .saturating_mul(py as u32)
-        .checked_div(100)
-        .unwrap_or(0) as u16;
+    let popup_width = (area.width as u32 * px as u32 / 100) as u16;
+    let popup_height = (area.height as u32 * py as u32 / 100) as u16;
 
     let x = area
         .x

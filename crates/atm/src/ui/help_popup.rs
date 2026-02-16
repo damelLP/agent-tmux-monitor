@@ -47,7 +47,7 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
             Span::raw("Move up"),
         ]),
         Line::from(vec![
-            Span::styled("    gg      ", key_style),
+            Span::styled("    0 / gg  ", key_style),
             Span::raw("Go to top"),
         ]),
         Line::from(vec![
@@ -86,7 +86,15 @@ pub fn render_help_popup(frame: &mut Frame, area: Rect) {
             Span::raw("Toggle this help"),
         ]),
         Line::from(vec![
-            Span::styled("    q / Esc ", key_style),
+            Span::styled("    Esc     ", key_style),
+            Span::raw("Close help / quit"),
+        ]),
+        Line::from(vec![
+            Span::styled("    q       ", key_style),
+            Span::raw("Quit"),
+        ]),
+        Line::from(vec![
+            Span::styled("    Ctrl-c  ", key_style),
             Span::raw("Quit"),
         ]),
     ];
