@@ -51,7 +51,7 @@ pub enum UiAction {
 
 /// Category for grouping keybindings in the help popup.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HintCategory {
+pub(crate) enum HintCategory {
     /// Navigation bindings (movement, scrolling).
     Navigation,
     /// Action bindings (quit, refresh, jump, help).
@@ -62,7 +62,7 @@ pub enum HintCategory {
 ///
 /// Entries where `footer_key` is empty are not shown in the footer.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct KeybindingHint {
+pub(crate) struct KeybindingHint {
     /// Key display for the help popup (e.g., "j / \u{2193}").
     pub help_key: &'static str,
     /// Description for the help popup (e.g., "Move down").
@@ -82,7 +82,7 @@ pub struct KeybindingHint {
 /// This is the single source of truth consumed by both the help popup
 /// and the footer status bar. When adding a new keybinding to the DFA,
 /// add a corresponding entry here.
-pub static KEYBINDING_HINTS: &[KeybindingHint] = &[
+pub(crate) static KEYBINDING_HINTS: &[KeybindingHint] = &[
     // -- Navigation ----------------------------------------------------------
     KeybindingHint {
         help_key: "j / \u{2193}",

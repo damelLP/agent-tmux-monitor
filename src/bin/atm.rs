@@ -21,7 +21,7 @@ use std::time::Duration;
 use anyhow::{bail, Result};
 use clap::{Parser, Subcommand};
 use crossterm::{
-    event::{self, Event as CrosstermEvent, KeyCode},
+    event::{self, Event as CrosstermEvent, KeyCode, KeyModifiers},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
@@ -185,12 +185,16 @@ async fn run_event_loop(
                                 app.show_help = false;
                                 handler.reset();
                             }
+                            KeyCode::Char('c')
+                                if key.modifiers == KeyModifiers::CONTROL =>
+                            {
+                                app.quit();
+                                cancel_token.cancel();
+                                break;
+                            }
                             _ => {} // Swallow all other keys
                         }
-                        continue;
-                    }
-
-                    if let Some(action) = handler.handle(key) {
+                    } else if let Some(action) = handler.handle(key) {
                         match action {
                             UiAction::Quit => {
                                 app.quit();
