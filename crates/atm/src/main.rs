@@ -269,7 +269,7 @@ async fn run_event_loop(
                     if app.show_help {
                         match key.code {
                             KeyCode::Char('?') | KeyCode::Esc => {
-                                app.show_help = false;
+                                app.toggle_help();
                                 handler.reset();
                             }
                             KeyCode::Char('c')
