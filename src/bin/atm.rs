@@ -130,6 +130,20 @@ enum Command {
         #[arg(long)]
         prompt: bool,
     },
+    /// Reply to an agent's interactive prompt
+    Reply {
+        /// Session ID (short form) or tmux pane ID
+        target: String,
+        /// Option number to select (1-based), or omit to just press Enter
+        #[arg(long, short = 'o')]
+        option: Option<usize>,
+        /// Shortcut: accept/allow (press Enter on current selection)
+        #[arg(long, short = 'y', conflicts_with = "option")]
+        yes: bool,
+        /// Shortcut: reject/deny (press Escape)
+        #[arg(long, short = 'n', conflicts_with = "option", conflicts_with = "yes")]
+        no: bool,
+    },
     /// One-line status summary (for tmux status bar)
     Status,
 }
@@ -676,6 +690,87 @@ async fn cmd_list(
     Ok(())
 }
 
+async fn cmd_reply(
+    target: String,
+    option: Option<usize>,
+    yes: bool,
+    no: bool,
+) -> Result<()> {
+    daemon::ensure_daemon_running().map_err(|e| anyhow::anyhow!("Failed to start daemon: {e}"))?;
+    let sessions = fetch_sessions().await?;
+    let pane_id = resolve_pane_id(&sessions, &target)?;
+    let client = RealTmuxClient::new();
+
+    if no {
+        // Escape dismisses/cancels the prompt
+        client.send_keys(&pane_id, "Escape").await
+            .context("Failed to send Escape")?;
+        println!("Sent Escape to {pane_id}");
+        return Ok(());
+    }
+
+    if yes || option.is_none() {
+        // Just press Enter to accept current selection
+        client.send_keys(&pane_id, "Enter").await
+            .context("Failed to send Enter")?;
+        println!("Sent Enter to {pane_id}");
+        return Ok(());
+    }
+
+    // Navigate to the desired option number
+    let desired = option.unwrap_or(1);
+
+    // Capture the pane to find which option the cursor is on
+    let lines = client.capture_pane(&pane_id).await
+        .context("Failed to capture pane")?;
+
+    let current = find_selected_option(&lines).unwrap_or(1);
+
+    if desired == current {
+        // Already on the right option, just press Enter
+        client.send_keys(&pane_id, "Enter").await
+            .context("Failed to send Enter")?;
+    } else if desired > current {
+        // Navigate down
+        for _ in 0..(desired - current) {
+            client.send_keys(&pane_id, "Down").await
+                .context("Failed to send Down")?;
+        }
+        client.send_keys(&pane_id, "Enter").await
+            .context("Failed to send Enter")?;
+    } else {
+        // Navigate up
+        for _ in 0..(current - desired) {
+            client.send_keys(&pane_id, "Up").await
+                .context("Failed to send Up")?;
+        }
+        client.send_keys(&pane_id, "Enter").await
+            .context("Failed to send Enter")?;
+    }
+
+    println!("Selected option {desired} on {pane_id}");
+    Ok(())
+}
+
+/// Finds which numbered option currently has the ❯ cursor.
+/// Returns 1-based option number, or None if no cursor found.
+fn find_selected_option(lines: &[String]) -> Option<usize> {
+    for line in lines {
+        let trimmed = line.trim();
+        // Pattern: "❯ N. ..." where N is the option number
+        if let Some(rest) = trimmed.strip_prefix("❯ ") {
+            // Try to parse "N." at the start
+            if let Some(dot_pos) = rest.find('.') {
+                if let Ok(n) = rest[..dot_pos].trim().parse::<usize>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    // No cursor found — assume option 1 (default selection)
+    None
+}
+
 async fn cmd_peek(target: String, tail: Option<usize>, prompt: bool) -> Result<()> {
     daemon::ensure_daemon_running().map_err(|e| anyhow::anyhow!("Failed to start daemon: {e}"))?;
     let sessions = fetch_sessions().await?;
@@ -977,6 +1072,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Peek { target, tail, prompt }) => {
             return cmd_peek(target, tail, prompt).await;
+        }
+        Some(Command::Reply { target, option, yes, no }) => {
+            return cmd_reply(target, option, yes, no).await;
         }
         Some(Command::Status) => {
             return cmd_status().await;
