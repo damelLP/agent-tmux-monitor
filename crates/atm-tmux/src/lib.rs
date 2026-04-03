@@ -94,4 +94,10 @@ pub trait TmuxClient: Send + Sync {
 
     /// Selects (focuses) a pane.
     async fn select_pane(&self, pane: &str) -> Result<(), TmuxError>;
+
+    /// Captures the visible content of a pane.
+    ///
+    /// Returns the text currently displayed in the pane, one string per line.
+    /// Trailing blank lines are trimmed.
+    async fn capture_pane(&self, pane: &str) -> Result<Vec<String>, TmuxError>;
 }

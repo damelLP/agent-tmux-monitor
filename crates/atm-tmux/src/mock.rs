@@ -42,6 +42,9 @@ pub enum MockCall {
     SelectPane {
         pane: String,
     },
+    CapturePane {
+        pane: String,
+    },
 }
 
 /// Mock tmux client that records calls for test verification.
@@ -80,6 +83,8 @@ struct MockState {
     pane_id_queue: Vec<String>,
     /// Panes returned by list_panes.
     panes: Vec<PaneInfo>,
+    /// Content returned by capture_pane, keyed by pane ID.
+    pane_content: std::collections::HashMap<String, Vec<String>>,
     /// If set, the next call will return this error.
     next_error: Option<TmuxError>,
 }
@@ -92,6 +97,7 @@ impl MockTmuxClient {
                 calls: Vec::new(),
                 pane_id_queue: Vec::new(),
                 panes: Vec::new(),
+                pane_content: std::collections::HashMap::new(),
                 next_error: None,
             })),
         }
@@ -108,6 +114,13 @@ impl MockTmuxClient {
     pub fn set_panes(&self, panes: Vec<PaneInfo>) {
         if let Ok(mut state) = self.inner.lock() {
             state.panes = panes;
+        }
+    }
+
+    /// Sets the content returned by `capture_pane` for a specific pane.
+    pub fn set_pane_content(&self, pane: &str, content: Vec<String>) {
+        if let Ok(mut state) = self.inner.lock() {
+            state.pane_content.insert(pane.to_string(), content);
         }
     }
 
@@ -259,6 +272,19 @@ impl TmuxClient for MockTmuxClient {
         self.record(MockCall::SelectPane {
             pane: pane.to_string(),
         })
+    }
+
+    async fn capture_pane(&self, pane: &str) -> Result<Vec<String>, TmuxError> {
+        self.record(MockCall::CapturePane {
+            pane: pane.to_string(),
+        })?;
+        let content = self
+            .inner
+            .lock()
+            .ok()
+            .and_then(|state| state.pane_content.get(pane).cloned())
+            .unwrap_or_default();
+        Ok(content)
     }
 }
 

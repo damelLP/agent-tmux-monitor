@@ -208,6 +208,16 @@ impl TmuxClient for RealTmuxClient {
     async fn select_pane(&self, pane: &str) -> Result<(), TmuxError> {
         self.run_silent("select-pane", &["-t", pane]).await
     }
+
+    async fn capture_pane(&self, pane: &str) -> Result<Vec<String>, TmuxError> {
+        let output = self.run("capture-pane", &["-t", pane, "-p"]).await?;
+        // Trim trailing blank lines
+        let mut lines: Vec<String> = output.lines().map(|l| l.to_string()).collect();
+        while lines.last().map_or(false, |l| l.trim().is_empty()) {
+            lines.pop();
+        }
+        Ok(lines)
+    }
 }
 
 #[cfg(test)]

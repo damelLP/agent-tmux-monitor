@@ -119,6 +119,14 @@ enum Command {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Show the visible content of an agent's tmux pane
+    Peek {
+        /// Session ID (short form) or tmux pane ID
+        target: String,
+        /// Only show the last N lines
+        #[arg(long, short = 'n')]
+        tail: Option<usize>,
+    },
     /// One-line status summary (for tmux status bar)
     Status,
 }
@@ -665,6 +673,29 @@ async fn cmd_list(
     Ok(())
 }
 
+async fn cmd_peek(target: String, tail: Option<usize>) -> Result<()> {
+    daemon::ensure_daemon_running().map_err(|e| anyhow::anyhow!("Failed to start daemon: {e}"))?;
+    let sessions = fetch_sessions().await?;
+    let pane_id = resolve_pane_id(&sessions, &target)?;
+    let client = RealTmuxClient::new();
+    let lines = client
+        .capture_pane(&pane_id)
+        .await
+        .context(format!("Failed to capture pane {pane_id}"))?;
+
+    let output: &[String] = if let Some(n) = tail {
+        let start = lines.len().saturating_sub(n);
+        &lines[start..]
+    } else {
+        &lines
+    };
+
+    for line in output {
+        println!("{line}");
+    }
+    Ok(())
+}
+
 async fn cmd_status() -> Result<()> {
     daemon::ensure_daemon_running().map_err(|e| anyhow::anyhow!("Failed to start daemon: {e}"))?;
     let sessions = fetch_sessions().await?;
@@ -735,6 +766,9 @@ async fn main() -> Result<()> {
             project,
         }) => {
             return cmd_list(format, status, project).await;
+        }
+        Some(Command::Peek { target, tail }) => {
+            return cmd_peek(target, tail).await;
         }
         Some(Command::Status) => {
             return cmd_status().await;
