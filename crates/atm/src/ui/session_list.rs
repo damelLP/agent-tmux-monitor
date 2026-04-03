@@ -5,7 +5,7 @@
 
 use crate::app::{App, AppState};
 use crate::ui::theme::{context_color, status_background, status_color, status_icon};
-use atm_core::SessionView;
+use atm_core::{SessionView, TreeRow, TreeRowKind};
 use ratatui::{
     layout::Rect,
     style::{Color, Modifier, Style},
@@ -14,38 +14,28 @@ use ratatui::{
     Frame,
 };
 
-/// Renders the session list in the left panel.
+/// Renders the session list as a tree in the left panel.
 ///
-/// Shows a condensed view of active sessions with:
-/// - Display state icon (>, ~, !, z) - shows working/compacting/needs input/stale
-/// - Context usage percentage (color-coded)
-/// - Short session ID
-/// - Model name
-///
-/// Row backgrounds indicate status:
-/// - Yellow tint: needs input (waiting for user)
-/// - Red tint: critical context usage
-///
-/// When no sessions are available, displays a context-sensitive
-/// empty state message.
+/// Displays a grouped tree view: Project > Worktree > Agent.
+/// Group rows show collapse indicators (▼/▸) and agent counts.
+/// Agent rows show status icon, context %, short ID, and model.
 ///
 /// # Arguments
 /// * `frame` - The frame to render into
 /// * `area` - The rectangular area for the session list
-/// * `app` - Application state containing session data
+/// * `app` - Application state containing tree data
 pub fn render_session_list(frame: &mut Frame, area: Rect, app: &App) {
     if app.sessions.is_empty() {
         render_empty_state(frame, area, &app.state);
         return;
     }
 
-    let sessions = app.sessions_sorted();
-
-    let items: Vec<ListItem> = sessions
+    let items: Vec<ListItem> = app
+        .tree_rows
         .iter()
         .enumerate()
-        .map(|(idx, session)| {
-            create_session_item(session, idx == app.selected_index, app.blink_visible)
+        .map(|(idx, row)| {
+            create_tree_row_item(row, idx == app.selected_index, app.blink_visible)
         })
         .collect();
 
@@ -61,31 +51,107 @@ pub fn render_session_list(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(list, area);
 }
 
-/// Creates a list item for a single session (condensed format).
-///
-/// The format is optimized for the narrow 30% list panel:
-/// `> [icon] [percentage] [id] [model]`
-///
-/// # Arguments
-/// * `session` - The session view to render
-/// * `is_selected` - Whether this session is currently selected
-/// * `blink_visible` - Whether blinking icons should be visible this frame
-///
-/// # Returns
-/// A styled ListItem for the session with appropriate background color
-fn create_session_item(
-    session: &SessionView,
+/// Creates a list item for a single tree row.
+fn create_tree_row_item(
+    row: &TreeRow,
     is_selected: bool,
     blink_visible: bool,
 ) -> ListItem<'static> {
+    let indent = "  ".repeat(row.depth as usize);
+
+    let line = match &row.kind {
+        TreeRowKind::Project { name, .. } => {
+            create_group_line(&indent, name, row, is_selected)
+        }
+        TreeRowKind::Worktree { branch, path, .. } => {
+            let label = branch.as_deref().unwrap_or_else(|| {
+                path.rsplit('/').find(|s| !s.is_empty()).unwrap_or(path)
+            });
+            create_group_line(&indent, label, row, is_selected)
+        }
+        TreeRowKind::Team { name } => {
+            create_group_line(&indent, name, row, is_selected)
+        }
+        TreeRowKind::Agent { session } => {
+            create_agent_line(&indent, session, is_selected, blink_visible)
+        }
+    };
+
+    let bg_style = match &row.kind {
+        TreeRowKind::Agent { session } => get_row_background_style(session, is_selected),
+        _ if is_selected => Style::default().bg(Color::Rgb(30, 30, 40)),
+        _ => Style::default(),
+    };
+
+    ListItem::new(line).style(bg_style)
+}
+
+/// Creates a line for a group header (Project, Worktree, Team).
+fn create_group_line(
+    indent: &str,
+    label: &str,
+    row: &TreeRow,
+    is_selected: bool,
+) -> Line<'static> {
+    let collapse_icon = if !row.has_children {
+        " "
+    } else if row.is_expanded {
+        "▼"
+    } else {
+        "▸"
+    };
+
+    let attention_marker = if row.needs_attention { "!" } else { " " };
+
+    let mut spans = vec![
+        // Selection indicator
+        Span::styled(
+            if is_selected { ">" } else { " " },
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(format!("{indent}{collapse_icon} ")),
+        // Group name
+        Span::styled(
+            label.to_string(),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ];
+
+    // Show agent count when collapsed
+    if !row.is_expanded && row.agent_count > 0 {
+        spans.push(Span::styled(
+            format!(" ({})", row.agent_count),
+            Style::default().fg(Color::DarkGray),
+        ));
+    }
+
+    // Attention marker
+    if row.needs_attention {
+        spans.push(Span::styled(
+            format!(" {attention_marker}"),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+
+    Line::from(spans)
+}
+
+/// Creates a line for an agent (session) row.
+fn create_agent_line(
+    indent: &str,
+    session: &SessionView,
+    is_selected: bool,
+    blink_visible: bool,
+) -> Line<'static> {
     let context_pct = session.context_percentage;
     let ctx_color = context_color(context_pct, session.context_critical);
-
-    // Get status icon and color from theme
     let icon = status_icon(session.status, blink_visible);
     let icon_color = status_color(session.status);
 
-    // Build the condensed line
     let spans = vec![
         // Selection indicator
         Span::styled(
@@ -94,7 +160,8 @@ fn create_session_item(
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        // Status icon (blinking for attention states)
+        Span::raw(indent.to_string()),
+        // Status icon
         Span::styled(
             format!("{icon} "),
             Style::default().fg(icon_color).add_modifier(Modifier::BOLD),
@@ -118,19 +185,15 @@ fn create_session_item(
         ),
     ];
 
-    // Determine row background color based on status
-    let bg_style = get_row_background_style(session, is_selected);
-
-    ListItem::new(Line::from(spans)).style(bg_style)
+    Line::from(spans)
 }
 
 /// Returns the background style for a session row.
 fn get_row_background_style(session: &SessionView, is_selected: bool) -> Style {
-    // Priority: status background > critical context > selection
     let bg_color = status_background(session.status).or(if session.context_critical {
-        Some(Color::Rgb(40, 0, 0)) // Subtle red tint
+        Some(Color::Rgb(40, 0, 0))
     } else if is_selected {
-        Some(Color::Rgb(30, 30, 40)) // Subtle selection highlight
+        Some(Color::Rgb(30, 30, 40))
     } else {
         None
     });
@@ -279,62 +342,23 @@ fn render_empty_state(frame: &mut Frame, area: Rect, state: &AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{SessionId, SessionStatus};
-
-    fn test_session() -> SessionView {
-        SessionView {
-            id: SessionId::new("test-session-id"),
-            id_short: "test-ses".to_string(),
-            agent_type: "general".to_string(),
-            model: "Opus 4.5".to_string(),
-            status: SessionStatus::Working,
-            status_label: "working".to_string(),
-            activity_detail: None,
-            should_blink: false,
-            status_icon: ">".to_string(),
-            context_percentage: 25.0,
-            context_display: "25%".to_string(),
-            context_warning: false,
-            context_critical: false,
-            cost_display: "$0.50".to_string(),
-            cost_usd: 0.50,
-            duration_display: "5m".to_string(),
-            duration_seconds: 300.0,
-            lines_display: "+100 -20".to_string(),
-            working_directory: None,
-
-            needs_attention: false,
-            last_activity_display: "10s ago".to_string(),
-            age_display: "5m ago".to_string(),
-            started_at: "2024-01-15T10:00:00Z".to_string(),
-            last_activity: "2024-01-15T10:05:00Z".to_string(),
-            tmux_pane: None,
-            ..Default::default()
-        }
-    }
+    use atm_core::SessionStatus;
 
     #[test]
     fn test_status_icon_via_theme() {
-        // Icon logic is now in theme module, just verify integration
-        let session = test_session();
-        assert_eq!(status_icon(session.status, true), ">");
+        assert_eq!(status_icon(SessionStatus::Working, true), ">");
     }
 
     #[test]
     fn test_status_attention_needed_blinks() {
-        let mut session = test_session();
-        session.status = SessionStatus::AttentionNeeded;
-        assert_eq!(status_icon(session.status, true), "!");
-        assert_eq!(status_icon(session.status, false), " ");
+        assert_eq!(status_icon(SessionStatus::AttentionNeeded, true), "!");
+        assert_eq!(status_icon(SessionStatus::AttentionNeeded, false), " ");
     }
 
     #[test]
     fn test_status_idle_no_blink() {
-        let mut session = test_session();
-        session.status = SessionStatus::Idle;
-        // Idle does NOT blink - it's chill
-        assert_eq!(status_icon(session.status, true), "-");
-        assert_eq!(status_icon(session.status, false), "-");
+        assert_eq!(status_icon(SessionStatus::Idle, true), "-");
+        assert_eq!(status_icon(SessionStatus::Idle, false), "-");
     }
 
     #[test]
@@ -359,11 +383,8 @@ mod tests {
 
     #[test]
     fn test_truncate_string_utf8_multibyte() {
-        // Test with UTF-8 multi-byte characters (emoji is 1 char but multiple bytes)
         assert_eq!(truncate_string("hello🔥world", 8), "hello...");
-        // 5 chars fits exactly
         assert_eq!(truncate_string("🔥🔥🔥🔥🔥", 5), "🔥🔥🔥🔥🔥");
-        // Truncation with ellipsis
         assert_eq!(truncate_string("🔥🔥🔥🔥🔥", 4), "🔥...");
     }
 }

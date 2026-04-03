@@ -6,9 +6,12 @@
 //! All code follows the panic-free policy: no `.unwrap()`, `.expect()`,
 //! `panic!()`, `unreachable!()`, `todo!()`, or direct indexing `[i]`.
 
-use atm_core::{SessionId, SessionView};
+use atm_core::{
+    all_node_ids, build_tree, flatten_tree, SessionId, SessionView, TreeNode, TreeNodeId, TreeRow,
+    TreeRowKind,
+};
 use chrono::{DateTime, Utc};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 // ============================================================================
 // Application State
@@ -75,6 +78,15 @@ pub struct App {
 
     /// Whether the help popup is currently visible.
     pub show_help: bool,
+
+    /// Set of expanded tree node IDs.
+    pub expanded: HashSet<TreeNodeId>,
+
+    /// Cached tree structure (rebuilt on session changes).
+    tree: Vec<TreeNode>,
+
+    /// Flattened tree rows for rendering/navigation (rebuilt on session changes or expand/collapse).
+    pub tree_rows: Vec<TreeRow>,
 }
 
 impl Default for App {
@@ -96,6 +108,9 @@ impl App {
             tick_count: 0,
             pick_mode: false,
             show_help: false,
+            expanded: HashSet::new(),
+            tree: Vec::new(),
+            tree_rows: Vec::new(),
         }
     }
 
@@ -116,9 +131,7 @@ impl App {
         }
         self.state = AppState::Connected;
         self.last_update = Utc::now();
-
-        // Clamp selected_index to valid range
-        self.clamp_selection();
+        self.rebuild_tree();
     }
 
     /// Replaces all sessions with a new list from the daemon.
@@ -131,9 +144,7 @@ impl App {
         }
         self.state = AppState::Connected;
         self.last_update = Utc::now();
-
-        // Clamp selected_index to valid range
-        self.clamp_selection();
+        self.rebuild_tree();
     }
 
     /// Removes a session from the session list by ID.
@@ -142,18 +153,51 @@ impl App {
     /// the selection is clamped to a valid range.
     pub fn remove_session(&mut self, session_id: &str) {
         self.sessions.retain(|id, _| id.as_str() != session_id);
+        self.rebuild_tree();
+    }
 
-        // Clamp selected_index if needed
+    /// Rebuilds the tree from current session data and re-flattens it.
+    ///
+    /// Called after any session mutation. Preserves expand/collapse state.
+    /// On first build (no expanded nodes yet), expands all nodes so the
+    /// tree starts fully open.
+    fn rebuild_tree(&mut self) {
+        let sessions: Vec<SessionView> = self.sessions.values().cloned().collect();
+        self.tree = build_tree(&sessions);
+
+        // On first build, expand everything so the tree starts open
+        if self.expanded.is_empty() && !self.tree.is_empty() {
+            self.expanded = all_node_ids(&self.tree);
+        }
+
+        self.tree_rows = flatten_tree(&self.tree, &self.expanded);
         self.clamp_selection();
     }
 
-    /// Clamps the selected_index to a valid range based on current session count.
+    /// Toggles expand/collapse for the currently selected node.
+    pub fn toggle_expand(&mut self) {
+        if let Some(row) = self.tree_rows.get(self.selected_index) {
+            if row.has_children {
+                let node_id = row.node_id.clone();
+                if self.expanded.contains(&node_id) {
+                    self.expanded.remove(&node_id);
+                } else {
+                    self.expanded.insert(node_id);
+                }
+                // Re-flatten with new expand state
+                self.tree_rows = flatten_tree(&self.tree, &self.expanded);
+                self.clamp_selection();
+            }
+        }
+    }
+
+    /// Clamps the selected_index to a valid range based on current row count.
     fn clamp_selection(&mut self) {
-        let session_count = self.sessions.len();
-        if session_count == 0 {
+        let row_count = self.tree_rows.len();
+        if row_count == 0 {
             self.selected_index = 0;
-        } else if self.selected_index >= session_count {
-            self.selected_index = session_count.saturating_sub(1);
+        } else if self.selected_index >= row_count {
+            self.selected_index = row_count.saturating_sub(1);
         }
     }
 
@@ -196,47 +240,53 @@ impl App {
 
     /// Returns the currently selected session, if any.
     ///
-    /// Returns `None` if no sessions exist or the selection is out of bounds.
+    /// Returns `None` if no rows exist, the selection is out of bounds,
+    /// or the selected row is not an Agent row.
     pub fn selected_session(&self) -> Option<&SessionView> {
-        let sorted = self.sessions_sorted();
-        sorted.get(self.selected_index).copied()
+        self.tree_rows.get(self.selected_index).and_then(|row| {
+            if let TreeRowKind::Agent { ref session } = row.kind {
+                Some(session)
+            } else {
+                None
+            }
+        })
     }
 
-    /// Navigates to the next session (downward), wrapping around if needed.
+    /// Navigates to the next row (downward), wrapping around if needed.
     pub fn select_next(&mut self) {
-        let session_count = self.sessions.len();
-        if session_count == 0 {
+        let row_count = self.tree_rows.len();
+        if row_count == 0 {
             self.selected_index = 0;
             return;
         }
-        self.selected_index = (self.selected_index.saturating_add(1)) % session_count;
+        self.selected_index = (self.selected_index.saturating_add(1)) % row_count;
     }
 
-    /// Navigates to the previous session (upward), wrapping around if needed.
+    /// Navigates to the previous row (upward), wrapping around if needed.
     pub fn select_previous(&mut self) {
-        let session_count = self.sessions.len();
-        if session_count == 0 {
+        let row_count = self.tree_rows.len();
+        if row_count == 0 {
             self.selected_index = 0;
             return;
         }
         if self.selected_index == 0 {
-            self.selected_index = session_count.saturating_sub(1);
+            self.selected_index = row_count.saturating_sub(1);
         } else {
             self.selected_index = self.selected_index.saturating_sub(1);
         }
     }
 
-    /// Moves selection down by `n`, clamping at the last session.
+    /// Moves selection down by `n`, clamping at the last row.
     pub fn select_down(&mut self, n: usize) {
-        let session_count = self.sessions.len();
-        if session_count == 0 {
+        let row_count = self.tree_rows.len();
+        if row_count == 0 {
             self.selected_index = 0;
             return;
         }
         self.selected_index = self
             .selected_index
             .saturating_add(n)
-            .min(session_count.saturating_sub(1));
+            .min(row_count.saturating_sub(1));
     }
 
     /// Moves selection up by `n`, clamping at the first session.
@@ -246,12 +296,12 @@ impl App {
 
     /// Jumps to absolute index, clamped to `[0, len-1]`.
     pub fn select_go_to(&mut self, index: usize) {
-        let session_count = self.sessions.len();
-        if session_count == 0 {
+        let row_count = self.tree_rows.len();
+        if row_count == 0 {
             self.selected_index = 0;
             return;
         }
-        self.selected_index = index.min(session_count.saturating_sub(1));
+        self.selected_index = index.min(row_count.saturating_sub(1));
     }
 
     /// Moves down by `n * (viewport_height / 2)`, clamping at last session.
@@ -397,7 +447,7 @@ mod tests {
     #[test]
     fn test_update_sessions_clamps_selection() {
         let mut app = App::new();
-        app.selected_index = 5;
+        app.selected_index = 50;
 
         let sessions = vec![
             create_test_session("session-1", "2024-01-15T10:00:00Z"),
@@ -405,8 +455,8 @@ mod tests {
         ];
         app.update_sessions(sessions);
 
-        // Should be clamped to 1 (last valid index)
-        assert_eq!(app.selected_index, 1);
+        // Tree rows: 1 project header + 2 agents = 3 rows, max index = 2
+        assert_eq!(app.selected_index, app.tree_rows.len() - 1);
     }
 
     #[test]
@@ -447,12 +497,13 @@ mod tests {
             create_test_session("session-2", "2024-01-15T10:01:00Z"),
         ];
         app.update_sessions(sessions);
-        app.selected_index = 1; // Select second session
+        let last_idx = app.tree_rows.len() - 1;
+        app.selected_index = last_idx;
 
         app.remove_session("session-2");
 
-        // Selection should be clamped to 0 (only one session left)
-        assert_eq!(app.selected_index, 0);
+        // Selection should be clamped within new tree_rows bounds
+        assert!(app.selected_index < app.tree_rows.len());
         assert_eq!(app.sessions.len(), 1);
     }
 
@@ -537,15 +588,19 @@ mod tests {
         ];
         app.update_sessions(sessions);
 
-        // Index 0 should be the newest (session-2)
+        // Index 0 is the project header — selected_session returns None
         app.selected_index = 0;
+        assert!(app.selected_session().is_none());
+
+        // Index 1 is the first agent (newest: session-2)
+        app.selected_index = 1;
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
             Some("session-2")
         );
 
-        // Index 1 should be session-1
-        app.selected_index = 1;
+        // Index 2 is the second agent (session-1)
+        app.selected_index = 2;
         assert_eq!(
             app.selected_session().map(|s| s.id.as_str()),
             Some("session-1")
@@ -566,12 +621,10 @@ mod tests {
             create_test_session("session-2", "2024-01-15T10:01:00Z"),
         ];
         app.update_sessions(sessions);
+        // Tree: [Project, Agent, Agent] = 3 rows
+        let last = app.tree_rows.len() - 1;
 
-        assert_eq!(app.selected_index, 0);
-
-        app.select_next();
-        assert_eq!(app.selected_index, 1);
-
+        app.selected_index = last;
         app.select_next();
         assert_eq!(app.selected_index, 0); // Wrapped around
     }
@@ -584,14 +637,11 @@ mod tests {
             create_test_session("session-2", "2024-01-15T10:01:00Z"),
         ];
         app.update_sessions(sessions);
+        let last = app.tree_rows.len() - 1;
 
         assert_eq!(app.selected_index, 0);
-
         app.select_previous();
-        assert_eq!(app.selected_index, 1); // Wrapped around
-
-        app.select_previous();
-        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.selected_index, last); // Wrapped to last
     }
 
     #[test]
@@ -735,9 +785,10 @@ mod tests {
             create_test_session("session-2", "2024-01-15T10:01:00Z"),
             create_test_session("session-3", "2024-01-15T10:02:00Z"),
         ]);
+        let last = app.tree_rows.len() - 1;
         app.selected_index = 1;
-        app.select_down(10);
-        assert_eq!(app.selected_index, 2);
+        app.select_down(100);
+        assert_eq!(app.selected_index, last);
     }
 
     #[test]
@@ -759,8 +810,9 @@ mod tests {
             create_test_session("session-1", "2024-01-15T10:00:00Z"),
             create_test_session("session-2", "2024-01-15T10:01:00Z"),
         ]);
+        let last = app.tree_rows.len() - 1;
         app.select_go_to(99);
-        assert_eq!(app.selected_index, 1);
+        assert_eq!(app.selected_index, last);
     }
 
     #[test]
@@ -777,6 +829,7 @@ mod tests {
             .map(|i| create_test_session(&format!("s{i}"), &format!("2024-01-15T10:{i:02}:00Z")))
             .collect();
         app.update_sessions(sessions);
+        // 13 tree rows (1 project header + 12 agents), half page = 10
         app.selected_index = 0;
         app.select_half_page_down(1, 20);
         assert_eq!(app.selected_index, 10);
@@ -789,9 +842,9 @@ mod tests {
             .map(|i| create_test_session(&format!("s{i}"), &format!("2024-01-15T10:{i:02}:00Z")))
             .collect();
         app.update_sessions(sessions);
-        app.selected_index = 10;
+        app.selected_index = 12; // last agent row
         app.select_half_page_up(1, 20);
-        assert_eq!(app.selected_index, 0);
+        assert_eq!(app.selected_index, 2);
     }
 
     // ------------------------------------------------------------------------

@@ -330,7 +330,7 @@ async fn run_event_loop(
                             UiAction::MoveUp(n) => app.select_up(n),
                             UiAction::GoToRow(index) => app.select_go_to(index),
                             UiAction::GoToLast => {
-                                let last = app.sessions.len().saturating_sub(1);
+                                let last = app.tree_rows.len().saturating_sub(1);
                                 app.select_go_to(last);
                             }
                             UiAction::GoToFirst => app.select_go_to(0),
