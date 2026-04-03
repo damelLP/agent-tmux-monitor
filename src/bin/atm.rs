@@ -580,6 +580,11 @@ async fn cmd_send(target: String, text: String) -> Result<()> {
         .send_keys(&pane_id, &text)
         .await
         .context(format!("Failed to send keys to pane {pane_id}"))?;
+    // Send Enter to submit the text
+    client
+        .send_keys(&pane_id, "Enter")
+        .await
+        .context(format!("Failed to send Enter to pane {pane_id}"))?;
     Ok(())
 }
 
