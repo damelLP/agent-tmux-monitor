@@ -346,6 +346,58 @@ async fn run_event_loop(
                             UiAction::CollapseNode | UiAction::ExpandNode => {
                                 app.toggle_expand();
                             }
+                            UiAction::KillAgent => {
+                                if let Some(session) = app.selected_session() {
+                                    if let Some(ref pane_id) = session.tmux_pane {
+                                        let pane_id = pane_id.clone();
+                                        let client = RealTmuxClient::new();
+                                        info!(pane_id = %pane_id, "Killing agent pane");
+                                        tokio::spawn(async move {
+                                            if let Err(e) = client.kill_pane(&pane_id).await {
+                                                warn!(error = %e, "Failed to kill pane");
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            UiAction::InterruptAgent => {
+                                if let Some(session) = app.selected_session() {
+                                    if let Some(ref pane_id) = session.tmux_pane {
+                                        let pane_id = pane_id.clone();
+                                        let client = RealTmuxClient::new();
+                                        info!(pane_id = %pane_id, "Interrupting agent");
+                                        tokio::spawn(async move {
+                                            if let Err(e) = client.send_keys(&pane_id, "C-c").await {
+                                                warn!(error = %e, "Failed to interrupt");
+                                            }
+                                        });
+                                    }
+                                }
+                            }
+                            UiAction::SpawnAgent => {
+                                if tmux::is_in_tmux() {
+                                    let cwd = std::env::current_dir()
+                                        .ok()
+                                        .map(|p| p.to_string_lossy().to_string());
+                                    tokio::spawn(async move {
+                                        let client = RealTmuxClient::new();
+                                        let panes = client.list_panes().await.ok().unwrap_or_default();
+                                        let current = panes
+                                            .iter()
+                                            .find(|p| p.is_active)
+                                            .map(|p| p.pane_id.as_str())
+                                            .unwrap_or("%0");
+                                        let mut cmd = "claude".to_string();
+                                        if let Some(ref dir) = cwd {
+                                            cmd = format!("cd {dir} && {cmd}");
+                                        }
+                                        match client.split_window(current, "50%", true, Some(&cmd)).await {
+                                            Ok(pane_id) => info!(pane_id = %pane_id, "Spawned new agent"),
+                                            Err(e) => warn!(error = %e, "Failed to spawn agent"),
+                                        }
+                                    });
+                                }
+                            }
                         }
                     }
                 }

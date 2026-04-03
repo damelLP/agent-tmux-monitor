@@ -339,6 +339,11 @@ async fn run_event_loop(
                             UiAction::CollapseNode | UiAction::ExpandNode => {
                                 app.toggle_expand();
                             }
+                            // Agent management actions — no-op in crate binary
+                            // (only wired in src/bin/atm.rs which has atm-tmux)
+                            UiAction::KillAgent
+                            | UiAction::InterruptAgent
+                            | UiAction::SpawnAgent => {}
                         }
                     }
                 }

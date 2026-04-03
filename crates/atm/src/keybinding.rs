@@ -47,6 +47,12 @@ pub enum UiAction {
     CollapseNode,
     /// Expand the current tree node (or move to first child).
     ExpandNode,
+    /// Kill the selected agent and close its tmux pane.
+    KillAgent,
+    /// Interrupt the selected agent (SIGINT).
+    InterruptAgent,
+    /// Spawn a new agent in the current project.
+    SpawnAgent,
 }
 
 // ---------------------------------------------------------------------------
@@ -201,6 +207,38 @@ pub(crate) static KEYBINDING_HINTS: &[KeybindingHint] = &[
         category: HintCategory::Actions,
         tmux_only: false,
     },
+    KeybindingHint {
+        help_key: "h / l",
+        help_desc: "Collapse / Expand tree",
+        footer_key: "h/l",
+        footer_desc: "fold",
+        category: HintCategory::Navigation,
+        tmux_only: false,
+    },
+    KeybindingHint {
+        help_key: "dd / x",
+        help_desc: "Kill agent + close pane",
+        footer_key: "dd",
+        footer_desc: "kill",
+        category: HintCategory::Actions,
+        tmux_only: true,
+    },
+    KeybindingHint {
+        help_key: "I",
+        help_desc: "Interrupt agent (SIGINT)",
+        footer_key: "I",
+        footer_desc: "int",
+        category: HintCategory::Actions,
+        tmux_only: true,
+    },
+    KeybindingHint {
+        help_key: "o",
+        help_desc: "Spawn new agent",
+        footer_key: "o",
+        footer_desc: "spawn",
+        category: HintCategory::Actions,
+        tmux_only: true,
+    },
 ];
 
 // ---------------------------------------------------------------------------
@@ -216,6 +254,8 @@ pub(crate) enum KeyMeaning {
     Motion(MotionKind),
     /// The `g` prefix key.
     GPrefix,
+    /// The `d` prefix key (first `d` of `dd` kill).
+    DPrefix,
     /// A self-contained action that needs no count or prefix.
     SimpleAction(UiAction),
     /// A key we don't recognise.
@@ -241,6 +281,8 @@ enum InputState {
     Count(usize),
     /// Received a `g` prefix, optionally preceded by a count.
     PendingG { count: Option<usize> },
+    /// Received a `d` prefix, waiting for second `d` to confirm kill.
+    PendingD,
 }
 
 impl Default for InputState {
@@ -312,8 +354,12 @@ impl VimKeyResolver {
             'k' => KeyMeaning::Motion(MotionKind::Up),
             'G' => KeyMeaning::Motion(MotionKind::GoToBottom),
             'g' => KeyMeaning::GPrefix,
+            'd' => KeyMeaning::DPrefix,
             'h' => KeyMeaning::SimpleAction(UiAction::CollapseNode),
             'l' => KeyMeaning::SimpleAction(UiAction::ExpandNode),
+            'o' => KeyMeaning::SimpleAction(UiAction::SpawnAgent),
+            'x' => KeyMeaning::SimpleAction(UiAction::KillAgent),
+            'I' => KeyMeaning::SimpleAction(UiAction::InterruptAgent),
             'q' | 'Q' => KeyMeaning::SimpleAction(UiAction::Quit),
             'r' | 'R' => KeyMeaning::SimpleAction(UiAction::Refresh),
             '?' => KeyMeaning::SimpleAction(UiAction::ToggleHelp),
@@ -398,6 +444,7 @@ impl InputHandler {
             InputState::Ready => self.step_ready(meaning),
             InputState::Count(n) => self.step_count(n, meaning),
             InputState::PendingG { count } => self.step_pending_g(count, meaning),
+            InputState::PendingD => self.step_pending_d(meaning),
         }
     }
 
@@ -411,6 +458,10 @@ impl InputHandler {
             }
             KeyMeaning::GPrefix => {
                 self.state = InputState::PendingG { count: None };
+                None
+            }
+            KeyMeaning::DPrefix => {
+                self.state = InputState::PendingD;
                 None
             }
             KeyMeaning::Motion(kind) => Self::motion_with_count(1, kind),
@@ -430,6 +481,11 @@ impl InputHandler {
                 self.state = InputState::PendingG { count: Some(n) };
                 None
             }
+            KeyMeaning::DPrefix => {
+                // Count before dd is ignored (kill is always single target)
+                self.state = InputState::PendingD;
+                None
+            }
             KeyMeaning::Motion(kind) => Self::motion_with_count(n, kind),
             KeyMeaning::SimpleAction(action) => Some(action),
             KeyMeaning::Unbound => None,
@@ -445,6 +501,15 @@ impl InputHandler {
             },
             KeyMeaning::SimpleAction(action) => Some(action),
             _ => None,
+        }
+    }
+
+    /// Transitions from the `PendingD` state.
+    /// Second `d` confirms the kill. Any other key cancels.
+    fn step_pending_d(&mut self, meaning: KeyMeaning) -> Option<UiAction> {
+        match meaning {
+            KeyMeaning::DPrefix => Some(UiAction::KillAgent),
+            _ => None, // Cancel — return to Ready (already set by step())
         }
     }
 
@@ -680,8 +745,8 @@ mod tests {
         let mut h = InputHandler::new();
         assert_eq!(h.handle(key(KeyCode::Char('3'))), None);
         assert!(h.is_pending());
-        // 'x' is Unbound → resets state, emits None.
-        assert_eq!(h.handle(key(KeyCode::Char('x'))), None);
+        // 'z' is Unbound → resets state, emits None.
+        assert_eq!(h.handle(key(KeyCode::Char('z'))), None);
         assert!(!h.is_pending());
     }
 
