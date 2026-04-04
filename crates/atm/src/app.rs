@@ -93,6 +93,12 @@ pub struct App {
 
     /// The pane ID currently being captured (to detect selection changes).
     pub capture_pane_id: Option<String>,
+
+    /// If set, only show sessions whose tmux pane belongs to this tmux session.
+    pub tmux_session_filter: Option<String>,
+
+    /// Pane IDs that belong to the filtered tmux session (populated by filter task).
+    pub filter_pane_ids: HashSet<String>,
 }
 
 impl Default for App {
@@ -119,6 +125,8 @@ impl App {
             tree_rows: Vec::new(),
             captured_output: Vec::new(),
             capture_pane_id: None,
+            tmux_session_filter: None,
+            filter_pane_ids: HashSet::new(),
         }
     }
 
@@ -127,6 +135,23 @@ impl App {
         let mut app = Self::new();
         app.pick_mode = true;
         app
+    }
+
+    /// Creates a new App that filters sessions to a specific tmux session.
+    pub fn with_tmux_session_filter(session: String) -> Self {
+        let mut app = Self::new();
+        app.tmux_session_filter = Some(session);
+        app
+    }
+
+    /// Updates the set of pane IDs belonging to the filtered tmux session.
+    ///
+    /// Triggers a tree rebuild if the pane set changed.
+    pub fn update_filter_panes(&mut self, pane_ids: HashSet<String>) {
+        if self.filter_pane_ids != pane_ids {
+            self.filter_pane_ids = pane_ids;
+            self.rebuild_tree();
+        }
     }
 
     /// Updates the session list with new data from the daemon.
@@ -170,7 +195,24 @@ impl App {
     /// On first build (no expanded nodes yet), expands all nodes so the
     /// tree starts fully open.
     fn rebuild_tree(&mut self) {
-        let sessions: Vec<SessionView> = self.sessions.values().cloned().collect();
+        let sessions: Vec<SessionView> = if self.tmux_session_filter.is_some() {
+            if self.filter_pane_ids.is_empty() {
+                // Filter is set but pane IDs not loaded yet — show empty
+                Vec::new()
+            } else {
+                self.sessions
+                    .values()
+                    .filter(|s| {
+                        s.tmux_pane
+                            .as_ref()
+                            .map_or(false, |p| self.filter_pane_ids.contains(p))
+                    })
+                    .cloned()
+                    .collect()
+            }
+        } else {
+            self.sessions.values().cloned().collect()
+        };
         self.tree = build_tree(&sessions);
 
         // On first build, expand everything so the tree starts open

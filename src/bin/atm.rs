@@ -17,6 +17,7 @@
 //! atm uninstall              # Remove hooks
 //! ```
 
+use std::collections::HashSet;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -67,6 +68,10 @@ struct Args {
     /// Pick mode: exit after jumping to a session (fzf-style picker)
     #[arg(long, short = 'p', global = true)]
     pick: bool,
+
+    /// Only show agents whose tmux pane belongs to this tmux session
+    #[arg(long)]
+    tmux_session: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -146,6 +151,18 @@ enum Command {
     },
     /// One-line status summary (for tmux status bar)
     Status,
+    /// Launch a tmux workspace with ATM sidebar, agent, and shell
+    Workspace {
+        /// Session name (default: current directory basename)
+        #[arg(long)]
+        name: Option<String>,
+        /// Use isolated tmux server (separate from your main tmux)
+        #[arg(long)]
+        isolate: bool,
+        /// Include an editor pane alongside the agent
+        #[arg(long)]
+        editor: bool,
+    },
     /// Apply a layout template
     Layout {
         /// Layout name: solo, pair, squad, grid, or a custom name
@@ -489,6 +506,9 @@ async fn run_event_loop(
                 Event::SessionRemoved(session_id) => {
                     debug!(session_id = %session_id, "Session removed");
                     app.remove_session(&session_id);
+                }
+                Event::FilterUpdate(pane_ids) => {
+                    app.update_filter_panes(pane_ids);
                 }
                 Event::DiscoveryComplete { discovered, failed } => {
                     info!(discovered, failed, "Discovery complete");
@@ -1160,6 +1180,143 @@ async fn cmd_status() -> Result<()> {
 }
 
 // ============================================================================
+// Workspace Command
+// ============================================================================
+
+async fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()> {
+    // 1. Determine session name
+    let session_name = name.unwrap_or_else(|| {
+        std::env::current_dir()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+            .unwrap_or_else(|| "atm-workspace".to_string())
+    });
+
+    // 2. Create client (isolated or default)
+    let socket_name = if isolate {
+        Some(format!("atm-{session_name}"))
+    } else {
+        None
+    };
+    let client: RealTmuxClient = match &socket_name {
+        Some(s) => RealTmuxClient::with_socket(s.clone()),
+        None => RealTmuxClient::new(),
+    };
+
+    // 3. Pick layout
+    let layout = if editor {
+        atm_tmux::layout::preset_workspace_editor()
+    } else {
+        atm_tmux::layout::preset_workspace()
+    };
+
+    // 4. Apply layout (creates session + splits)
+    let result = atm_tmux::layout::apply_layout(
+        &client,
+        &layout,
+        atm_tmux::layout::LayoutTarget::NewSession(session_name.clone()),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // 5. Send commands to panes
+    // Agent panes: launch claude
+    if let Some(agent_panes) = result.panes.get(&atm_tmux::layout::SlotRole::Agent) {
+        for pane in agent_panes {
+            client
+                .send_keys(pane, "claude")
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            client
+                .send_keys(pane, "Enter")
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+    }
+
+    // ATM panel: launch filtered TUI
+    if let Some(atm_panes) = result.panes.get(&atm_tmux::layout::SlotRole::AtmPanel) {
+        for pane in atm_panes {
+            let mut atm_cmd = format!("atm --tmux-session {session_name}");
+            if let Some(ref socket) = socket_name {
+                atm_cmd.push_str(&format!(" --tmux-socket {socket}"));
+            }
+            client
+                .send_keys(pane, &atm_cmd)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            client
+                .send_keys(pane, "Enter")
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        }
+    }
+
+    // Shell and Editor panes: leave as default shell (no action needed)
+
+    // 6. Attach to the session
+    let mut attach = std::process::Command::new("tmux");
+    if let Some(ref socket) = socket_name {
+        attach.arg("-L").arg(socket);
+    }
+    attach.arg("attach-session").arg("-t").arg(&session_name);
+
+    // On Unix, use exec to replace the current process
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = attach.exec();
+        // exec only returns on error
+        bail!("Failed to attach to tmux session: {err}");
+    }
+
+    #[cfg(not(unix))]
+    {
+        let status = attach
+            .status()
+            .context("Failed to attach to tmux session")?;
+        if !status.success() {
+            bail!("tmux attach failed with status {status}");
+        }
+        Ok(())
+    }
+}
+
+// ============================================================================
+// Filter Task
+// ============================================================================
+
+/// Spawns a task that periodically polls tmux for pane IDs belonging to the
+/// filtered session and sends FilterUpdate events.
+fn spawn_filter_task(
+    session_name: String,
+    event_tx: mpsc::UnboundedSender<Event>,
+    cancel_token: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let client = RealTmuxClient::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        loop {
+            interval.tick().await;
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            if let Ok(panes) = client.list_panes().await {
+                let pane_ids: HashSet<String> = panes
+                    .iter()
+                    .filter(|p| p.session_name == session_name)
+                    .map(|p| p.pane_id.clone())
+                    .collect();
+                if event_tx.send(Event::FilterUpdate(pane_ids)).is_err() {
+                    break;
+                }
+            }
+        }
+    })
+}
+
+// ============================================================================
 // Main Entry Point
 // ============================================================================
 
@@ -1207,6 +1364,9 @@ async fn main() -> Result<()> {
         }
         Some(Command::Status) => {
             return cmd_status().await;
+        }
+        Some(Command::Workspace { name, isolate, editor }) => {
+            return cmd_workspace(name, isolate, editor).await;
         }
         Some(Command::Layout { name, session, in_place }) => {
             let layout = atm_tmux::layout::load_layout(&name, None)
@@ -1281,6 +1441,8 @@ async fn main() -> Result<()> {
 
     let mut app = if args.pick {
         App::with_pick_mode()
+    } else if let Some(ref session) = args.tmux_session {
+        App::with_tmux_session_filter(session.clone())
     } else {
         App::new()
     };
@@ -1292,6 +1454,11 @@ async fn main() -> Result<()> {
     });
 
     let keyboard_handle = spawn_keyboard_task(event_tx.clone(), cancel_token.clone());
+
+    // Spawn filter task if --tmux-session is set
+    let filter_handle = args.tmux_session.map(|session| {
+        spawn_filter_task(session, event_tx.clone(), cancel_token.clone())
+    });
 
     // Create watch channel for selected pane ID and spawn capture polling task
     let (capture_pane_tx, capture_pane_rx) = tokio::sync::watch::channel(None::<String>);
@@ -1312,6 +1479,9 @@ async fn main() -> Result<()> {
     let _ = tokio::time::timeout(Duration::from_millis(100), daemon_handle).await;
     let _ = tokio::time::timeout(Duration::from_millis(100), keyboard_handle).await;
     let _ = tokio::time::timeout(Duration::from_millis(100), capture_handle).await;
+    if let Some(handle) = filter_handle {
+        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
 
     if let Err(e) = cleanup_terminal(&mut terminal) {
         error!(error = %e, "Failed to cleanup terminal");

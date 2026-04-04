@@ -73,6 +73,10 @@ struct Args {
     /// Pick mode: exit after jumping to a session (fzf-style picker)
     #[arg(long, short = 'p', global = true)]
     pick: bool,
+
+    /// Only show agents whose tmux pane belongs to this tmux session
+    #[arg(long)]
+    tmux_session: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -255,6 +259,53 @@ fn spawn_capture_task(
 }
 
 // ============================================================================
+// Tmux Session Filter Task
+// ============================================================================
+
+/// Spawns a task that periodically polls tmux for pane IDs belonging to a session.
+///
+/// Every 3 seconds, calls `list_panes` and collects the pane IDs whose
+/// `session_name` matches the target. Sends a `FilterUpdate` event when
+/// the set changes (or on first poll).
+fn spawn_filter_task(
+    session_name: String,
+    event_tx: mpsc::UnboundedSender<Event>,
+    cancel_token: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let client = atm_tmux::RealTmuxClient::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(3));
+        let mut prev = std::collections::HashSet::new();
+
+        loop {
+            interval.tick().await;
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            let pane_ids: std::collections::HashSet<String> = match client.list_panes().await {
+                Ok(panes) => panes
+                    .into_iter()
+                    .filter(|p| p.session_name == session_name)
+                    .map(|p| p.pane_id)
+                    .collect(),
+                Err(e) => {
+                    warn!(error = %e, "Filter task: list_panes failed");
+                    continue;
+                }
+            };
+
+            if pane_ids != prev {
+                prev.clone_from(&pane_ids);
+                if event_tx.send(Event::FilterUpdate(pane_ids)).is_err() {
+                    break;
+                }
+            }
+        }
+    })
+}
+
+// ============================================================================
 // Main Event Loop
 // ============================================================================
 
@@ -411,6 +462,10 @@ async fn run_event_loop(
                 }
                 Event::CaptureUpdate { pane_id, lines } => {
                     app.update_capture(&pane_id, lines);
+                }
+                Event::FilterUpdate(pane_ids) => {
+                    debug!(count = pane_ids.len(), "Filter pane IDs updated");
+                    app.update_filter_panes(pane_ids);
                 }
                 Event::SessionUpdate(sessions) => {
                     debug!(count = sessions.len(), "Received session update");
@@ -625,7 +680,13 @@ async fn main() -> Result<()> {
     };
 
     // 6. Initialize application state
-    let mut app = if args.pick {
+    let mut app = if let Some(ref session) = args.tmux_session {
+        let mut a = App::with_tmux_session_filter(session.clone());
+        if args.pick {
+            a.pick_mode = true;
+        }
+        a
+    } else if args.pick {
         App::with_pick_mode()
     } else {
         App::new()
@@ -643,7 +704,12 @@ async fn main() -> Result<()> {
 
     // 9. Create watch channel for selected pane ID and spawn capture polling task
     let (capture_pane_tx, capture_pane_rx) = tokio::sync::watch::channel(None::<String>);
-    let capture_handle = spawn_capture_task(event_tx, cancel_token.clone(), capture_pane_rx);
+    let capture_handle = spawn_capture_task(event_tx.clone(), cancel_token.clone(), capture_pane_rx);
+
+    // 9.5. Optionally spawn filter task for --tmux-session
+    let filter_handle = args.tmux_session.map(|session_name| {
+        spawn_filter_task(session_name, event_tx, cancel_token.clone())
+    });
 
     // 10. Run the main event loop
     let result = run_event_loop(
@@ -663,6 +729,9 @@ async fn main() -> Result<()> {
     let _ = tokio::time::timeout(Duration::from_millis(100), daemon_handle).await;
     let _ = tokio::time::timeout(Duration::from_millis(100), keyboard_handle).await;
     let _ = tokio::time::timeout(Duration::from_millis(100), capture_handle).await;
+    if let Some(handle) = filter_handle {
+        let _ = tokio::time::timeout(Duration::from_millis(100), handle).await;
+    }
 
     // 13. Cleanup terminal (always, even on error)
     if let Err(e) = cleanup_terminal(&mut terminal) {

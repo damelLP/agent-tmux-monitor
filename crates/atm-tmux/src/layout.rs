@@ -285,6 +285,111 @@ pub fn preset_grid() -> Layout {
     }
 }
 
+/// Returns the built-in "workspace" layout:
+/// 10% left ATM sidebar, 90% right with agent (80%) over shell (20%).
+pub fn preset_workspace() -> Layout {
+    Layout {
+        name: "workspace".to_string(),
+        root: Slot {
+            role: SlotRole::Shell,
+            size: "100%".to_string(),
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                Slot {
+                    role: SlotRole::AtmPanel,
+                    size: "10%".to_string(),
+                    direction: SplitDirection::Horizontal,
+                    children: vec![],
+                    count: 1,
+                },
+                Slot {
+                    role: SlotRole::Shell,
+                    size: "90%".to_string(),
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        Slot {
+                            role: SlotRole::Agent,
+                            size: "80%".to_string(),
+                            direction: SplitDirection::Horizontal,
+                            children: vec![],
+                            count: 1,
+                        },
+                        Slot {
+                            role: SlotRole::Shell,
+                            size: "20%".to_string(),
+                            direction: SplitDirection::Horizontal,
+                            children: vec![],
+                            count: 1,
+                        },
+                    ],
+                    count: 1,
+                },
+            ],
+            count: 1,
+        },
+    }
+}
+
+/// Returns the built-in "workspace-editor" layout:
+/// 10% left ATM sidebar, 90% right with editor+agent (80%, side-by-side) over shell (20%).
+pub fn preset_workspace_editor() -> Layout {
+    Layout {
+        name: "workspace-editor".to_string(),
+        root: Slot {
+            role: SlotRole::Shell,
+            size: "100%".to_string(),
+            direction: SplitDirection::Horizontal,
+            children: vec![
+                Slot {
+                    role: SlotRole::AtmPanel,
+                    size: "10%".to_string(),
+                    direction: SplitDirection::Horizontal,
+                    children: vec![],
+                    count: 1,
+                },
+                Slot {
+                    role: SlotRole::Shell,
+                    size: "90%".to_string(),
+                    direction: SplitDirection::Vertical,
+                    children: vec![
+                        Slot {
+                            role: SlotRole::Shell,
+                            size: "80%".to_string(),
+                            direction: SplitDirection::Horizontal,
+                            children: vec![
+                                Slot {
+                                    role: SlotRole::Editor,
+                                    size: "50%".to_string(),
+                                    direction: SplitDirection::Horizontal,
+                                    children: vec![],
+                                    count: 1,
+                                },
+                                Slot {
+                                    role: SlotRole::Agent,
+                                    size: "50%".to_string(),
+                                    direction: SplitDirection::Horizontal,
+                                    children: vec![],
+                                    count: 1,
+                                },
+                            ],
+                            count: 1,
+                        },
+                        Slot {
+                            role: SlotRole::Shell,
+                            size: "20%".to_string(),
+                            direction: SplitDirection::Horizontal,
+                            children: vec![],
+                            count: 1,
+                        },
+                    ],
+                    count: 1,
+                },
+            ],
+            count: 1,
+        },
+    }
+}
+
 /// Returns a preset layout by name, or `None` if not found.
 pub fn preset_by_name(name: &str) -> Option<Layout> {
     match name {
@@ -292,6 +397,8 @@ pub fn preset_by_name(name: &str) -> Option<Layout> {
         "pair" => Some(preset_pair()),
         "squad" => Some(preset_squad()),
         "grid" => Some(preset_grid()),
+        "workspace" => Some(preset_workspace()),
+        "workspace-editor" => Some(preset_workspace_editor()),
         _ => None,
     }
 }
@@ -582,11 +689,47 @@ name = "nope"
     }
 
     #[test]
+    fn preset_workspace_structure() {
+        let layout = preset_workspace();
+        assert_eq!(layout.name, "workspace");
+        assert_eq!(count_agent_slots(&layout.root), 1);
+        // Root has ATM panel + workspace container
+        assert_eq!(layout.root.children.len(), 2);
+        assert_eq!(layout.root.children[0].role, SlotRole::AtmPanel);
+        // Workspace container has agent + shell
+        let ws = &layout.root.children[1];
+        assert_eq!(ws.children.len(), 2);
+        assert_eq!(ws.children[0].role, SlotRole::Agent);
+        assert_eq!(ws.children[1].role, SlotRole::Shell);
+    }
+
+    #[test]
+    fn preset_workspace_editor_structure() {
+        let layout = preset_workspace_editor();
+        assert_eq!(layout.name, "workspace-editor");
+        assert_eq!(count_agent_slots(&layout.root), 1);
+        // Root has ATM panel + workspace container
+        assert_eq!(layout.root.children.len(), 2);
+        assert_eq!(layout.root.children[0].role, SlotRole::AtmPanel);
+        // Workspace container has main container + shell
+        let ws = &layout.root.children[1];
+        assert_eq!(ws.children.len(), 2);
+        // Main container has editor + agent
+        let main = &ws.children[0];
+        assert_eq!(main.children.len(), 2);
+        assert_eq!(main.children[0].role, SlotRole::Editor);
+        assert_eq!(main.children[1].role, SlotRole::Agent);
+        assert_eq!(ws.children[1].role, SlotRole::Shell);
+    }
+
+    #[test]
     fn preset_by_name_known() {
         assert!(preset_by_name("solo").is_some());
         assert!(preset_by_name("pair").is_some());
         assert!(preset_by_name("squad").is_some());
         assert!(preset_by_name("grid").is_some());
+        assert!(preset_by_name("workspace").is_some());
+        assert!(preset_by_name("workspace-editor").is_some());
     }
 
     #[test]
