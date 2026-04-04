@@ -1244,76 +1244,65 @@ async fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Res
             .unwrap_or_else(|| "atm-workspace".to_string())
     });
 
-    // 2. Create client (isolated or default)
+    // 2. Build tmux base command args (handles --isolate socket)
     let socket_name = if isolate {
         Some(format!("atm-{session_name}"))
     } else {
         None
     };
-    let client: RealTmuxClient = match &socket_name {
-        Some(s) => RealTmuxClient::with_socket(s.clone()),
-        None => RealTmuxClient::new(),
-    };
 
-    // 3. Pick layout
-    let layout = if editor {
-        atm_tmux::layout::preset_workspace_editor()
-    } else {
-        atm_tmux::layout::preset_workspace()
-    };
-
-    // 4. Apply layout (creates session + splits)
-    let result = atm_tmux::layout::apply_layout(
-        &client,
-        &layout,
-        atm_tmux::layout::LayoutTarget::NewSession(session_name.clone()),
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
-
-    // 5. Send commands to panes
-    // Agent panes: launch claude
-    if let Some(agent_panes) = result.panes.get(&atm_tmux::layout::SlotRole::Agent) {
-        for pane in agent_panes {
-            client
-                .send_keys(pane, "claude")
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            client
-                .send_keys(pane, "Enter")
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
+    /// Helper: run a tmux command with optional socket, return stdout.
+    fn tmux_run(socket: &Option<String>, args: &[&str]) -> Result<String> {
+        let mut cmd = std::process::Command::new("tmux");
+        if let Some(ref s) = socket {
+            cmd.arg("-L").arg(s);
         }
+        cmd.args(args);
+        let output = cmd.output().context("Failed to run tmux")?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            bail!("tmux {} failed: {}", args.first().unwrap_or(&""), stderr.trim());
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    // ATM panel: swap to left side, then launch filtered TUI
-    if let Some(atm_panes) = result.panes.get(&atm_tmux::layout::SlotRole::AtmPanel) {
-        for pane in atm_panes {
-            // ATM pane was created on the right (split-window -h creates to the right).
-            // Swap it to the leftmost position so the sidebar is on the left.
-            let mut swap_cmd = std::process::Command::new("tmux");
-            if let Some(ref socket) = socket_name {
-                swap_cmd.arg("-L").arg(socket);
-            }
-            let _ = swap_cmd
-                .args(["swap-pane", "-s", pane, "-t", &format!("{session_name}:0.0")])
-                .output();
+    // 3. Create session — the initial pane becomes the agent pane
+    let agent_pane = tmux_run(
+        &socket_name,
+        &["new-session", "-d", "-s", &session_name, "-P", "-F", "#{pane_id}"],
+    )?;
 
-            let atm_cmd = format!("atm --tmux-session {session_name}");
-            client
-                .send_keys(pane, &atm_cmd)
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-            client
-                .send_keys(pane, "Enter")
-                .await
-                .map_err(|e| anyhow::anyhow!("{e}"))?;
-        }
+    // 4. Split: ATM sidebar on the left (30 columns) using -hb (horizontal, before)
+    let atm_pane = tmux_run(
+        &socket_name,
+        &["split-window", "-hb", "-t", &agent_pane, "-l", "30", "-P", "-F", "#{pane_id}"],
+    )?;
+
+    // 5. Split: shell below the agent pane (20% height)
+    let _shell_pane = tmux_run(
+        &socket_name,
+        &["split-window", "-v", "-t", &agent_pane, "-l", "20%", "-P", "-F", "#{pane_id}"],
+    )?;
+
+    // 6. If --editor: split agent pane horizontally, editor on the left
+    if editor {
+        let _editor_pane = tmux_run(
+            &socket_name,
+            &["split-window", "-hb", "-t", &agent_pane, "-l", "50%", "-P", "-F", "#{pane_id}"],
+        )?;
     }
 
-    // Shell and Editor panes: leave as default shell (no action needed)
+    // 7. Launch claude in agent pane
+    tmux_run(&socket_name, &["send-keys", "-t", &agent_pane, "claude", "Enter"])?;
 
-    // 6. Attach to the session
+    // 8. Launch ATM TUI in sidebar (filtered to this session)
+    let atm_cmd = format!("atm --tmux-session {session_name}");
+    tmux_run(&socket_name, &["send-keys", "-t", &atm_pane, &atm_cmd, "Enter"])?;
+
+    // 9. Focus the agent pane
+    tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;
+
+    // 10. Attach to the session
     let mut attach = std::process::Command::new("tmux");
     if let Some(ref socket) = socket_name {
         attach.arg("-L").arg(socket);
