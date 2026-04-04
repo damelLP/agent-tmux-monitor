@@ -45,6 +45,9 @@ pub enum MockCall {
     CapturePane {
         pane: String,
     },
+    NewSession {
+        name: String,
+    },
 }
 
 /// Mock tmux client that records calls for test verification.
@@ -285,6 +288,14 @@ impl TmuxClient for MockTmuxClient {
             .and_then(|state| state.pane_content.get(pane).cloned())
             .unwrap_or_default();
         Ok(content)
+    }
+
+    async fn new_session(&self, name: &str) -> Result<String, TmuxError> {
+        let pane_id = self.next_pane_id();
+        self.record(MockCall::NewSession {
+            name: name.to_string(),
+        })?;
+        Ok(pane_id)
     }
 }
 

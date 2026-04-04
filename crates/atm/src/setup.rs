@@ -189,6 +189,40 @@ fn install_hook_script() -> Result<()> {
     Ok(())
 }
 
+/// Installs the ATM tmux keybindings file to ~/.config/atm/tmux-bindings.conf.
+fn install_tmux_bindings() -> Result<()> {
+    let config_dir = dirs::config_dir()
+        .ok_or_else(|| anyhow::anyhow!("could not determine config directory"))?
+        .join("atm");
+
+    std::fs::create_dir_all(&config_dir)?;
+
+    let bindings_path = config_dir.join("tmux-bindings.conf");
+    let content = r#"# ATM — Agent Tmux Manager bindings
+# Source this in your .tmux.conf: source-file ~/.config/atm/tmux-bindings.conf
+
+# Spawn a new Claude agent in current project
+bind C-n run-shell "atm spawn"
+
+# Toggle ATM sidebar panel
+bind C-a run-shell "atm toggle-panel"
+
+# ATM popup overlay (alternative to sidebar)
+bind C-s display-popup -E -w 35% -h 100% -x 0 "atm"
+
+# Status bar integration (uncomment and add to status-right):
+# set -g status-right '#(atm status) | %H:%M'
+"#;
+
+    std::fs::write(&bindings_path, content)?;
+    println!("Installed tmux bindings: {}", bindings_path.display());
+    println!(
+        "Add to your .tmux.conf: source-file {}",
+        bindings_path.display()
+    );
+    Ok(())
+}
+
 /// Removes the atm-hook script from ~/.local/bin/
 fn remove_hook_script() -> Result<bool> {
     let hook_path = hook_script_path();
@@ -267,6 +301,10 @@ pub fn setup() -> Result<()> {
     } else {
         println!("\nAll settings already configured.");
     }
+
+    // Step 4: Install tmux keybindings
+    println!();
+    install_tmux_bindings()?;
 
     println!("\nNext step:");
     println!("  Run: atm");

@@ -218,6 +218,20 @@ impl TmuxClient for RealTmuxClient {
         }
         Ok(lines)
     }
+
+    async fn new_session(&self, name: &str) -> Result<String, TmuxError> {
+        let output = self
+            .run("new-session", &["-d", "-s", name, "-P", "-F", "#{pane_id}"])
+            .await?;
+        let pane_id = output.trim().to_string();
+        if pane_id.is_empty() {
+            return Err(TmuxError::ParseError(
+                "new-session returned empty pane ID".to_string(),
+            ));
+        }
+        debug!(%pane_id, "new-session created");
+        Ok(pane_id)
+    }
 }
 
 #[cfg(test)]

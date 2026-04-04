@@ -55,6 +55,8 @@ use crate::error::{Result as TuiResult, TuiError};
 use crate::input::{ClientCommand, Event};
 use crate::keybinding::{InputHandler, UiAction};
 
+use atm_tmux::TmuxClient;
+
 // ============================================================================
 // CLI Arguments
 // ============================================================================
@@ -79,6 +81,17 @@ enum Command {
     Setup,
     /// Remove atm hooks from Claude Code
     Uninstall,
+    /// Apply a layout template
+    Layout {
+        /// Layout name: solo, pair, squad, grid, or a custom name
+        name: String,
+        /// Create a new tmux session instead of a window
+        #[arg(long)]
+        session: Option<String>,
+        /// Split the current pane in-place (default: create new window)
+        #[arg(long)]
+        in_place: bool,
+    },
 }
 
 // ============================================================================
@@ -205,6 +218,43 @@ fn spawn_keyboard_task(
 }
 
 // ============================================================================
+// Capture Polling Task
+// ============================================================================
+
+/// Spawns a task that periodically captures the selected agent's tmux pane output.
+fn spawn_capture_task(
+    event_tx: mpsc::UnboundedSender<Event>,
+    cancel_token: CancellationToken,
+    capture_pane_rx: tokio::sync::watch::Receiver<Option<String>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let client = atm_tmux::RealTmuxClient::new();
+        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        loop {
+            interval.tick().await;
+            if cancel_token.is_cancelled() {
+                break;
+            }
+
+            let pane_id = capture_pane_rx.borrow().clone();
+            if let Some(ref pane) = pane_id {
+                if let Ok(lines) = client.capture_pane(pane).await {
+                    if event_tx
+                        .send(Event::CaptureUpdate {
+                            pane_id: pane.clone(),
+                            lines,
+                        })
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+// ============================================================================
 // Main Event Loop
 // ============================================================================
 
@@ -234,6 +284,7 @@ async fn run_event_loop(
     event_rx: &mut mpsc::UnboundedReceiver<Event>,
     command_tx: &mpsc::UnboundedSender<ClientCommand>,
     cancel_token: &CancellationToken,
+    capture_pane_tx: &tokio::sync::watch::Sender<Option<String>>,
 ) -> Result<()> {
     // Tick interval for periodic UI refresh (e.g., updating timestamps)
     let tick_rate = Duration::from_millis(100);
@@ -345,18 +396,43 @@ async fn run_event_loop(
                             | UiAction::InterruptAgent
                             | UiAction::SpawnAgent => {}
                         }
+
+                        // After any action, check if selected pane changed
+                        let new_pane = app.selected_session().and_then(|s| s.tmux_pane.clone());
+                        if app.capture_pane_id != new_pane {
+                            app.capture_pane_id.clone_from(&new_pane);
+                            app.captured_output.clear();
+                            let _ = capture_pane_tx.send(new_pane);
+                        }
                     }
                 }
                 Event::Resize(_width, _height) => {
                     debug!("Terminal resized");
                 }
+                Event::CaptureUpdate { pane_id, lines } => {
+                    app.update_capture(&pane_id, lines);
+                }
                 Event::SessionUpdate(sessions) => {
                     debug!(count = sessions.len(), "Received session update");
                     app.update_sessions(sessions);
+                    // Sessions may have changed — update capture target
+                    let new_pane = app.selected_session().and_then(|s| s.tmux_pane.clone());
+                    if app.capture_pane_id != new_pane {
+                        app.capture_pane_id.clone_from(&new_pane);
+                        app.captured_output.clear();
+                        let _ = capture_pane_tx.send(new_pane);
+                    }
                 }
                 Event::SessionListReplace(sessions) => {
                     debug!(count = sessions.len(), "Received full session list");
                     app.replace_sessions(sessions);
+                    // Sessions replaced — update capture target
+                    let new_pane = app.selected_session().and_then(|s| s.tmux_pane.clone());
+                    if app.capture_pane_id != new_pane {
+                        app.capture_pane_id.clone_from(&new_pane);
+                        app.captured_output.clear();
+                        let _ = capture_pane_tx.send(new_pane);
+                    }
                 }
                 Event::SessionRemoved(session_id) => {
                     debug!(session_id = %session_id, "Session removed");
@@ -460,6 +536,30 @@ async fn main() -> Result<()> {
         Some(Command::Uninstall) => {
             return setup::uninstall();
         }
+        Some(Command::Layout { name, session, in_place }) => {
+            let layout = atm_tmux::layout::load_layout(&name, None)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            let target = if let Some(ref session_name) = session {
+                atm_tmux::layout::LayoutTarget::NewSession(session_name.clone())
+            } else if in_place {
+                let pane_id = std::env::var("TMUX_PANE")
+                    .map_err(|_| anyhow::anyhow!("TMUX_PANE not set — are you in tmux?"))?;
+                atm_tmux::layout::LayoutTarget::CurrentPane(pane_id)
+            } else {
+                atm_tmux::layout::LayoutTarget::NewWindow(Some(name.clone()))
+            };
+
+            let client = atm_tmux::RealTmuxClient::new();
+            let result = atm_tmux::layout::apply_layout(&client, &layout, target)
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+            for (role, panes) in &result.panes {
+                println!("{role:?}: {}", panes.join(", "));
+            }
+            return Ok(());
+        }
         None => {
             // Continue with normal TUI operation
         }
@@ -539,26 +639,32 @@ async fn main() -> Result<()> {
     });
 
     // 8. Spawn keyboard input task
-    let keyboard_handle = spawn_keyboard_task(event_tx, cancel_token.clone());
+    let keyboard_handle = spawn_keyboard_task(event_tx.clone(), cancel_token.clone());
 
-    // 9. Run the main event loop
+    // 9. Create watch channel for selected pane ID and spawn capture polling task
+    let (capture_pane_tx, capture_pane_rx) = tokio::sync::watch::channel(None::<String>);
+    let capture_handle = spawn_capture_task(event_tx, cancel_token.clone(), capture_pane_rx);
+
+    // 10. Run the main event loop
     let result = run_event_loop(
         &mut terminal,
         &mut app,
         &mut event_rx,
         &command_tx,
         &cancel_token,
+        &capture_pane_tx,
     )
     .await;
 
-    // 10. Signal shutdown to all tasks
+    // 11. Signal shutdown to all tasks
     cancel_token.cancel();
 
-    // 11. Wait for tasks to finish with timeout
+    // 12. Wait for tasks to finish with timeout
     let _ = tokio::time::timeout(Duration::from_millis(100), daemon_handle).await;
     let _ = tokio::time::timeout(Duration::from_millis(100), keyboard_handle).await;
+    let _ = tokio::time::timeout(Duration::from_millis(100), capture_handle).await;
 
-    // 12. Cleanup terminal (always, even on error)
+    // 13. Cleanup terminal (always, even on error)
     if let Err(e) = cleanup_terminal(&mut terminal) {
         error!(error = %e, "Failed to cleanup terminal");
         // Still return the original error if there was one

@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 atm-core = { workspace = true }
 atm-protocol = { workspace = true }
+atm-tmux = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 ratatui = { workspace = true }

@@ -68,7 +68,7 @@ pub fn render(frame: &mut Frame, app: &App) {
 
     // Render split view: session list (30%) | detail panel (70%)
     render_session_list(frame, layout.list_area, app);
-    render_detail_panel_inline(frame, layout.detail_area, app.selected_session());
+    render_detail_panel_inline(frame, layout.detail_area, app.selected_session(), &app.captured_output);
 
     // Render help popup overlay (on top of everything)
     if app.show_help {

@@ -9,6 +9,7 @@
 
 pub mod client;
 pub mod error;
+pub mod layout;
 pub mod mock;
 
 pub use client::RealTmuxClient;
@@ -100,4 +101,7 @@ pub trait TmuxClient: Send + Sync {
     /// Returns the text currently displayed in the pane, one string per line.
     /// Trailing blank lines are trimmed.
     async fn capture_pane(&self, pane: &str) -> Result<Vec<String>, TmuxError>;
+
+    /// Creates a new detached tmux session, returning the initial pane ID.
+    async fn new_session(&self, name: &str) -> Result<String, TmuxError>;
 }

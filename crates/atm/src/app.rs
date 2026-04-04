@@ -87,6 +87,12 @@ pub struct App {
 
     /// Flattened tree rows for rendering/navigation (rebuilt on session changes or expand/collapse).
     pub tree_rows: Vec<TreeRow>,
+
+    /// Captured terminal output from the selected agent's tmux pane.
+    pub captured_output: Vec<String>,
+
+    /// The pane ID currently being captured (to detect selection changes).
+    pub capture_pane_id: Option<String>,
 }
 
 impl Default for App {
@@ -111,6 +117,8 @@ impl App {
             expanded: HashSet::new(),
             tree: Vec::new(),
             tree_rows: Vec::new(),
+            captured_output: Vec::new(),
+            capture_pane_id: None,
         }
     }
 
@@ -250,6 +258,13 @@ impl App {
                 None
             }
         })
+    }
+
+    /// Updates the captured output if it matches the currently tracked pane.
+    pub fn update_capture(&mut self, pane_id: &str, lines: Vec<String>) {
+        if self.capture_pane_id.as_deref() == Some(pane_id) {
+            self.captured_output = lines;
+        }
     }
 
     /// Navigates to the next row (downward), wrapping around if needed.

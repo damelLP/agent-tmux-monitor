@@ -6,7 +6,7 @@
 use crate::ui::theme::{context_color, status_color};
 use atm_core::{SessionStatus, SessionView};
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::{Block, Borders, Paragraph},
@@ -23,7 +23,12 @@ use ratatui::{
 /// * `frame` - The frame to render into
 /// * `area` - The rectangular area to fill
 /// * `session` - The session to display (or None for empty state)
-pub fn render_detail_panel_inline(frame: &mut Frame, area: Rect, session: Option<&SessionView>) {
+pub fn render_detail_panel_inline(
+    frame: &mut Frame,
+    area: Rect,
+    session: Option<&SessionView>,
+    captured_output: &[String],
+) {
     match session {
         Some(session) => {
             // Build the detail content (reuse existing logic)
@@ -38,13 +43,52 @@ pub fn render_detail_panel_inline(frame: &mut Frame, area: Rect, session: Option
                 Color::Cyan
             };
 
-            let block = Block::default()
-                .title(" Details ")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(border_color));
+            if captured_output.is_empty() {
+                // No capture data — full area for metadata (existing behavior)
+                let block = Block::default()
+                    .title(" Details ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color));
 
-            let paragraph = Paragraph::new(lines).block(block);
-            frame.render_widget(paragraph, area);
+                let paragraph = Paragraph::new(lines).block(block);
+                frame.render_widget(paragraph, area);
+            } else {
+                // Split: top 40% metadata, bottom 60% terminal capture
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .split(area);
+
+                let meta_area = chunks.first().copied().unwrap_or(area);
+                let capture_area = chunks.get(1).copied().unwrap_or(area);
+
+                // Render metadata section
+                let meta_block = Block::default()
+                    .title(" Details ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(border_color));
+
+                let meta_paragraph = Paragraph::new(lines).block(meta_block);
+                frame.render_widget(meta_paragraph, meta_area);
+
+                // Render terminal capture section
+                let capture_block = Block::default()
+                    .title(" Terminal ")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(Color::DarkGray));
+
+                // Show last N lines that fit (auto-scroll to bottom)
+                let inner_height = capture_area.height.saturating_sub(2) as usize;
+                let start = captured_output.len().saturating_sub(inner_height);
+                let visible_lines: Vec<Line<'_>> = captured_output
+                    .iter()
+                    .skip(start)
+                    .map(|l| Line::from(Span::raw(l.as_str())))
+                    .collect();
+
+                let capture_paragraph = Paragraph::new(visible_lines).block(capture_block);
+                frame.render_widget(capture_paragraph, capture_area);
+            }
         }
         None => {
             // Empty state - no session selected

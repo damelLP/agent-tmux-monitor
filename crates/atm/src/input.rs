@@ -37,6 +37,9 @@ pub enum Event {
     /// A session was removed from the daemon.
     SessionRemoved(String),
 
+    /// Updated pane capture output for a specific pane.
+    CaptureUpdate { pane_id: String, lines: Vec<String> },
+
     /// Discovery operation completed.
     DiscoveryComplete {
         /// Number of sessions discovered.
