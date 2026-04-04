@@ -445,19 +445,33 @@ async fn run_event_loop(
                                     let cwd = std::env::current_dir()
                                         .ok()
                                         .map(|p| p.to_string_lossy().to_string());
+                                    // Get the current ATM pane ID so we can avoid splitting it
+                                    let atm_pane = std::env::var("TMUX_PANE").ok();
                                     tokio::spawn(async move {
                                         let client = RealTmuxClient::new();
                                         let panes = client.list_panes().await.ok().unwrap_or_default();
-                                        let current = panes
+                                        // Find the largest non-ATM pane in the same session
+                                        // to split into (avoids splitting the narrow sidebar)
+                                        let current_session = atm_pane.as_deref()
+                                            .and_then(|ap| panes.iter().find(|p| p.pane_id == ap))
+                                            .map(|p| p.session_name.as_str());
+                                        let target = panes
                                             .iter()
-                                            .find(|p| p.is_active)
+                                            .filter(|p| {
+                                                // Same session
+                                                current_session.map_or(true, |s| p.session_name == s)
+                                                // Not the ATM pane
+                                                && atm_pane.as_deref() != Some(p.pane_id.as_str())
+                                            })
+                                            .max_by_key(|p| (p.width as u32) * (p.height as u32))
                                             .map(|p| p.pane_id.as_str())
+                                            .or(panes.iter().find(|p| p.is_active).map(|p| p.pane_id.as_str()))
                                             .unwrap_or("%0");
                                         let mut cmd = "claude".to_string();
                                         if let Some(ref dir) = cwd {
                                             cmd = format!("cd {dir} && {cmd}");
                                         }
-                                        match client.split_window(current, "50%", true, Some(&cmd)).await {
+                                        match client.split_window(target, "50%", true, Some(&cmd)).await {
                                             Ok(pane_id) => info!(pane_id = %pane_id, "Spawned new agent"),
                                             Err(e) => warn!(error = %e, "Failed to spawn agent"),
                                         }

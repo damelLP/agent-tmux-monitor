@@ -286,7 +286,7 @@ pub fn preset_grid() -> Layout {
 }
 
 /// Returns the built-in "workspace" layout:
-/// 10% left ATM sidebar, 90% right with agent (80%) over shell (20%).
+/// 5% left ATM sidebar, 95% right with agent (80%) over shell (20%).
 pub fn preset_workspace() -> Layout {
     Layout {
         name: "workspace".to_string(),
@@ -297,14 +297,14 @@ pub fn preset_workspace() -> Layout {
             children: vec![
                 Slot {
                     role: SlotRole::AtmPanel,
-                    size: "10%".to_string(),
+                    size: "5%".to_string(),
                     direction: SplitDirection::Horizontal,
                     children: vec![],
                     count: 1,
                 },
                 Slot {
                     role: SlotRole::Shell,
-                    size: "90%".to_string(),
+                    size: "95%".to_string(),
                     direction: SplitDirection::Vertical,
                     children: vec![
                         Slot {
@@ -331,7 +331,7 @@ pub fn preset_workspace() -> Layout {
 }
 
 /// Returns the built-in "workspace-editor" layout:
-/// 10% left ATM sidebar, 90% right with editor+agent (80%, side-by-side) over shell (20%).
+/// 5% left ATM sidebar, 95% right with editor+agent (80%, side-by-side) over shell (20%).
 pub fn preset_workspace_editor() -> Layout {
     Layout {
         name: "workspace-editor".to_string(),
@@ -342,14 +342,14 @@ pub fn preset_workspace_editor() -> Layout {
             children: vec![
                 Slot {
                     role: SlotRole::AtmPanel,
-                    size: "10%".to_string(),
+                    size: "5%".to_string(),
                     direction: SplitDirection::Horizontal,
                     children: vec![],
                     count: 1,
                 },
                 Slot {
                     role: SlotRole::Shell,
-                    size: "90%".to_string(),
+                    size: "95%".to_string(),
                     direction: SplitDirection::Vertical,
                     children: vec![
                         Slot {
