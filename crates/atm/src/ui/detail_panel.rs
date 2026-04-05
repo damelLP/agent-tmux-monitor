@@ -264,7 +264,7 @@ pub fn render_compact_preview(
                 if let Some(ref desc) = task.description {
                     result.push(Line::from(Span::styled(
                         desc.clone(),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(Color::White),
                     )));
                 }
             }
