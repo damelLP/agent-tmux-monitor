@@ -271,13 +271,6 @@ pub fn render_compact_preview(
                 }
             }
 
-            if let Some(ref prompt) = s.first_prompt {
-                result.push(Line::from(Span::styled(
-                    prompt.clone(),
-                    Style::default().fg(Color::White),
-                )));
-            }
-
             // Fallback: status info
             if result.is_empty() {
                 let status_line = match &s.activity_detail {
