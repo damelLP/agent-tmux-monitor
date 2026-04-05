@@ -227,96 +227,72 @@ fn build_progress_bar(percentage: f64, width: usize) -> String {
     )
 }
 
-/// Renders the compact preview pane: task context (2 lines) + terminal capture.
+/// Renders the compact preview pane: beads task + first prompt summary.
+///
+/// Content (word-wrapped to fill available space):
+/// - Beads in-progress task title (cyan, bold)
+/// - First user prompt
+/// - Fallback: status info if nothing else available
 pub fn render_compact_preview(
     frame: &mut Frame,
     area: Rect,
     session: Option<&SessionView>,
-    captured_output: &[String],
+    _captured_output: &[String],
 ) {
-    if area.height < 3 {
-        // Not enough space for both sections — show capture only
-        render_terminal_capture(frame, area, captured_output);
-        return;
-    }
+    let block = Block::default()
+        .title(" Summary ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    let [task_area, capture_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),  // Task context header
-            Constraint::Min(3),    // Terminal capture
-        ])
-        .areas(area);
-
-    render_task_context(frame, task_area, session);
-    render_terminal_capture(frame, capture_area, captured_output);
-}
-
-/// Renders task context in the compact preview (placeholder — shows session metadata).
-fn render_task_context(frame: &mut Frame, area: Rect, session: Option<&SessionView>) {
     let lines: Vec<Line<'_>> = match session {
         Some(s) => {
-            let status_line = match &s.activity_detail {
-                Some(detail) => format!("{} ({})", s.status_label, detail),
-                None => s.status_label.clone(),
-            };
-            vec![
-                Line::from(Span::styled(
+            let mut result: Vec<Line<'_>> = Vec::new();
+
+            // Beads task: try project_root first (where .beads/ lives), then worktree_path
+            let beads_task = s.project_root.as_deref()
+                .or(s.worktree_path.as_deref())
+                .and_then(|dir| {
+                    let tasks = atm_core::beads::find_in_progress_tasks(dir);
+                    tasks.into_iter().next()
+                });
+
+            if let Some(ref task) = beads_task {
+                result.push(Line::from(Span::styled(
+                    task.title.clone(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                if let Some(ref desc) = task.description {
+                    for line in desc.lines() {
+                        result.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                }
+            }
+
+            // Fallback: status info
+            if result.is_empty() {
+                let status_line = match &s.activity_detail {
+                    Some(detail) => format!("{} ({})", s.status_label, detail),
+                    None => s.status_label.clone(),
+                };
+                result.push(Line::from(Span::styled(
                     status_line,
-                    Style::default().fg(status_color(s.status)).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(vec![
-                    Span::styled(&s.model, Style::default().fg(Color::White)),
-                    Span::raw(" · "),
-                    Span::styled(&s.cost_display, Style::default().fg(Color::Green)),
-                    Span::raw(" · "),
-                    Span::styled(
-                        format!("{:.0}%", s.context_percentage),
-                        Style::default().fg(context_color(s.context_percentage, s.context_critical)),
-                    ),
-                ]),
-            ]
+                    Style::default().fg(status_color(s.status)),
+                )));
+            }
+
+            result
         }
         None => vec![
             Line::from(Span::styled("No session selected", Style::default().fg(Color::DarkGray))),
         ],
     };
 
-    let block = Block::default()
-        .title(" Task ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    let paragraph = Paragraph::new(lines).block(block);
-    frame.render_widget(paragraph, area);
-}
-
-/// Renders the terminal capture section (auto-scrolls to bottom).
-pub fn render_terminal_capture(
-    frame: &mut Frame,
-    area: Rect,
-    captured_output: &[String],
-) {
-    let block = Block::default()
-        .title(" Terminal ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    if captured_output.is_empty() {
-        let paragraph = Paragraph::new("").block(block);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let start = captured_output.len().saturating_sub(inner_height);
-    let visible_lines: Vec<Line<'_>> = captured_output
-        .iter()
-        .skip(start)
-        .map(|l| Line::from(Span::raw(l.as_str())))
-        .collect();
-
-    let paragraph = Paragraph::new(visible_lines).block(block);
+    let paragraph = Paragraph::new(lines)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(paragraph, area);
 }
 

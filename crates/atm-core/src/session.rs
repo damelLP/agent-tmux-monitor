@@ -593,6 +593,10 @@ pub struct SessionDomain {
     /// Child subagent session IDs spawned by this session.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_session_ids: Vec<SessionId>,
+
+    /// First user prompt (captured from the first UserPromptSubmit hook event).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
 }
 
 impl SessionDomain {
@@ -620,6 +624,7 @@ impl SessionDomain {
             worktree_branch: None,
             parent_session_id: None,
             child_session_ids: Vec::new(),
+            first_prompt: None,
         }
     }
 
@@ -710,6 +715,7 @@ impl SessionDomain {
             HookEventType::UserPromptSubmit => {
                 self.status = SessionStatus::Working;
                 self.current_activity = None;
+                // first_prompt is set separately via set_first_prompt()
             }
             HookEventType::Stop => {
                 self.status = SessionStatus::Idle;
@@ -740,6 +746,13 @@ impl SessionDomain {
                 // Subagent tracking deferred to future PR
                 self.status = SessionStatus::Working;
             }
+        }
+    }
+
+    /// Stores the first user prompt if not already set.
+    pub fn set_first_prompt(&mut self, prompt: &str) {
+        if self.first_prompt.is_none() && !prompt.is_empty() {
+            self.first_prompt = Some(prompt.to_string());
         }
     }
 
@@ -1104,6 +1117,10 @@ pub struct SessionView {
     /// Child subagent session IDs
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub child_session_ids: Vec<SessionId>,
+
+    /// First user prompt (for preview summary)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_prompt: Option<String>,
 }
 
 impl SessionView {
@@ -1161,6 +1178,7 @@ impl SessionView {
             worktree_branch: session.worktree_branch.clone(),
             parent_session_id: session.parent_session_id.clone(),
             child_session_ids: session.child_session_ids.clone(),
+            first_prompt: session.first_prompt.clone(),
         }
     }
 }

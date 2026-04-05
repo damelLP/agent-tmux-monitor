@@ -87,6 +87,8 @@ pub enum RegistryCommand {
         agent_id: Option<String>,
         /// Subagent type (e.g., "explore", "plan")
         agent_type: Option<String>,
+        /// User prompt text (for UserPromptSubmit events)
+        prompt: Option<String>,
         /// Channel to send the result
         respond_to: oneshot::Sender<Result<(), RegistryError>>,
     },

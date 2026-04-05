@@ -146,6 +146,7 @@ impl RegistryHandle {
         tmux_pane: Option<String>,
         agent_id: Option<String>,
         agent_type: Option<String>,
+        prompt: Option<String>,
     ) -> Result<(), RegistryError> {
         let (tx, rx) = oneshot::channel();
 
@@ -159,6 +160,7 @@ impl RegistryHandle {
                 tmux_pane,
                 agent_id,
                 agent_type,
+                prompt,
                 respond_to: tx,
             })
             .await
@@ -457,6 +459,7 @@ mod tests {
                 tmux_pane,
                 agent_id: _,
                 agent_type: _,
+                prompt: _,
                 respond_to,
             }) = rx.recv().await
             {
@@ -482,6 +485,7 @@ mod tests {
                 Some("%5".to_string()),
                 None, // agent_id
                 None, // agent_type
+                None, // prompt
             )
             .await;
         assert!(result.is_ok());
