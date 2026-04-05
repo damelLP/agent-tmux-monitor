@@ -230,20 +230,19 @@ fn build_progress_bar(percentage: f64, width: usize) -> String {
 /// Renders the compact preview pane: beads task + prompt summary, then terminal capture.
 ///
 /// Content:
-/// - Line 1: Beads in-progress task title (if found at project root)
-/// - Line 2+: First user prompt (word-wrapped, if available)
-/// - Remaining space: Terminal capture (auto-scrolls to bottom)
+/// - Beads in-progress task title (if found at project root)
+/// - First user prompt (word-wrapped by ratatui)
+/// - Terminal capture below (auto-scrolls to bottom)
 pub fn render_compact_preview(
     frame: &mut Frame,
     area: Rect,
     session: Option<&SessionView>,
     captured_output: &[String],
 ) {
-    // Build summary lines (beads task + first prompt)
-    let summary_lines: Vec<Line<'_>> = match session {
+    // Build summary text (beads task + first prompt)
+    let summary_text: Vec<Line<'_>> = match session {
         Some(s) => {
             let mut result: Vec<Line<'_>> = Vec::new();
-            let width = area.width.saturating_sub(2) as usize;
 
             // Beads task: try project_root first (where .beads/ lives), then worktree_path
             let beads_title = s.project_root.as_deref()
@@ -253,23 +252,18 @@ pub fn render_compact_preview(
                     tasks.into_iter().next().map(|t| t.title)
                 });
 
-            if let Some(ref title) = beads_title {
+            if let Some(title) = beads_title {
                 result.push(Line::from(Span::styled(
-                    truncate_to_width(title, width),
+                    title,
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 )));
             }
 
-            // First prompt (1-2 lines max to leave room for terminal)
             if let Some(ref prompt) = s.first_prompt {
-                let prompt_lines = if beads_title.is_some() { 1 } else { 2 };
-                let wrapped = wrap_text(prompt, width);
-                for line in wrapped.into_iter().take(prompt_lines) {
-                    result.push(Line::from(Span::styled(
-                        line,
-                        Style::default().fg(Color::White),
-                    )));
-                }
+                result.push(Line::from(Span::styled(
+                    prompt.clone(),
+                    Style::default().fg(Color::White),
+                )));
             }
 
             result
@@ -277,19 +271,19 @@ pub fn render_compact_preview(
         None => Vec::new(),
     };
 
-    let summary_height = summary_lines.len() as u16;
+    let has_summary = !summary_text.is_empty();
 
-    if summary_height == 0 {
+    if !has_summary {
         // No summary — give all space to terminal capture
         render_terminal_capture(frame, area, captured_output);
         return;
     }
 
-    // Split area: summary on top, terminal capture below
+    // Split: summary gets ~40% (min 4 lines), terminal gets rest
     let [summary_area, capture_area] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(summary_height + 2), // +2 for borders
+            Constraint::Percentage(40),
             Constraint::Min(3),
         ])
         .areas(area);
@@ -298,57 +292,12 @@ pub fn render_compact_preview(
         .title(" Summary ")
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
-    let paragraph = Paragraph::new(summary_lines).block(block);
+    let paragraph = Paragraph::new(summary_text)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false });
     frame.render_widget(paragraph, summary_area);
 
     render_terminal_capture(frame, capture_area, captured_output);
-}
-
-/// Wraps text to fit within a given width, breaking on word boundaries.
-fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let mut lines = Vec::new();
-    let mut current_line = String::new();
-
-    for word in text.split_whitespace() {
-        if current_line.is_empty() {
-            if word.len() > width {
-                // Word is longer than width — hard break
-                let mut remaining = word;
-                while remaining.len() > width {
-                    let (chunk, rest) = remaining.split_at(width);
-                    lines.push(chunk.to_string());
-                    remaining = rest;
-                }
-                current_line = remaining.to_string();
-            } else {
-                current_line = word.to_string();
-            }
-        } else if current_line.len() + 1 + word.len() <= width {
-            current_line.push(' ');
-            current_line.push_str(word);
-        } else {
-            lines.push(current_line);
-            current_line = word.to_string();
-        }
-    }
-    if !current_line.is_empty() {
-        lines.push(current_line);
-    }
-    lines
-}
-
-/// Truncates a string to fit within a given width, adding "…" if truncated.
-fn truncate_to_width(s: &str, width: usize) -> String {
-    if s.len() <= width {
-        s.to_string()
-    } else if width <= 1 {
-        "…".to_string()
-    } else {
-        format!("{}…", &s[..width - 1])
-    }
 }
 
 /// Renders the terminal capture section (auto-scrolls to bottom).
