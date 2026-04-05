@@ -227,68 +227,134 @@ fn build_progress_bar(percentage: f64, width: usize) -> String {
     )
 }
 
-/// Renders the compact preview pane: task context (2 lines) + terminal capture.
+/// Renders the compact preview pane: summary of what the agent is working on.
+///
+/// Content priority:
+/// - Line 1: Beads in-progress task title (if found in agent's working directory)
+/// - Remaining lines: First user prompt (truncated to fit)
+/// - Fallback: Status + model info if no prompt/task available
 pub fn render_compact_preview(
     frame: &mut Frame,
     area: Rect,
     session: Option<&SessionView>,
-    captured_output: &[String],
+    _captured_output: &[String],
 ) {
-    if area.height < 3 {
-        // Not enough space for both sections — show capture only
-        render_terminal_capture(frame, area, captured_output);
-        return;
-    }
+    let block = Block::default()
+        .title(" Summary ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
 
-    let [task_area, capture_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(2),  // Task context header
-            Constraint::Min(3),    // Terminal capture
-        ])
-        .areas(area);
+    let inner_height = area.height.saturating_sub(2) as usize; // borders eat 2 lines
 
-    render_task_context(frame, task_area, session);
-    render_terminal_capture(frame, capture_area, captured_output);
-}
-
-/// Renders task context in the compact preview (placeholder — shows session metadata).
-fn render_task_context(frame: &mut Frame, area: Rect, session: Option<&SessionView>) {
     let lines: Vec<Line<'_>> = match session {
         Some(s) => {
-            let status_line = match &s.activity_detail {
-                Some(detail) => format!("{} ({})", s.status_label, detail),
-                None => s.status_label.clone(),
-            };
-            vec![
-                Line::from(Span::styled(
+            let mut result: Vec<Line<'_>> = Vec::new();
+
+            // Line 1: Beads task title if available
+            let beads_title = s.working_directory.as_deref().and_then(|wd| {
+                // working_directory may be shortened for display ("...tail")
+                // Use the raw path from project_root or worktree_path as fallback
+                let dir = if wd.starts_with("...") {
+                    s.worktree_path.as_deref().or(s.project_root.as_deref())
+                } else {
+                    Some(wd)
+                };
+                dir.and_then(|d| {
+                    let tasks = atm_core::beads::find_in_progress_tasks(d);
+                    tasks.into_iter().next().map(|t| t.title)
+                })
+            });
+
+            if let Some(ref title) = beads_title {
+                result.push(Line::from(Span::styled(
+                    truncate_to_width(title, area.width.saturating_sub(2) as usize),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+            }
+
+            // Remaining lines: first prompt
+            if let Some(ref prompt) = s.first_prompt {
+                let remaining = inner_height.saturating_sub(result.len());
+                if remaining > 0 {
+                    let width = area.width.saturating_sub(2) as usize;
+                    let wrapped = wrap_text(prompt, width);
+                    for line in wrapped.into_iter().take(remaining) {
+                        result.push(Line::from(Span::styled(
+                            line,
+                            Style::default().fg(Color::White),
+                        )));
+                    }
+                }
+            }
+
+            // Fallback: if nothing to show, display status info
+            if result.is_empty() {
+                let status_line = match &s.activity_detail {
+                    Some(detail) => format!("{} ({})", s.status_label, detail),
+                    None => s.status_label.clone(),
+                };
+                result.push(Line::from(Span::styled(
                     status_line,
-                    Style::default().fg(status_color(s.status)).add_modifier(Modifier::BOLD),
-                )),
-                Line::from(vec![
-                    Span::styled(&s.model, Style::default().fg(Color::White)),
-                    Span::raw(" · "),
-                    Span::styled(&s.cost_display, Style::default().fg(Color::Green)),
-                    Span::raw(" · "),
-                    Span::styled(
-                        format!("{:.0}%", s.context_percentage),
-                        Style::default().fg(context_color(s.context_percentage, s.context_critical)),
-                    ),
-                ]),
-            ]
+                    Style::default().fg(status_color(s.status)),
+                )));
+            }
+
+            result
         }
         None => vec![
             Line::from(Span::styled("No session selected", Style::default().fg(Color::DarkGray))),
         ],
     };
 
-    let block = Block::default()
-        .title(" Task ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
     let paragraph = Paragraph::new(lines).block(block);
     frame.render_widget(paragraph, area);
+}
+
+/// Wraps text to fit within a given width, breaking on word boundaries.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return Vec::new();
+    }
+    let mut lines = Vec::new();
+    let mut current_line = String::new();
+
+    for word in text.split_whitespace() {
+        if current_line.is_empty() {
+            if word.len() > width {
+                // Word is longer than width — hard break
+                let mut remaining = word;
+                while remaining.len() > width {
+                    let (chunk, rest) = remaining.split_at(width);
+                    lines.push(chunk.to_string());
+                    remaining = rest;
+                }
+                current_line = remaining.to_string();
+            } else {
+                current_line = word.to_string();
+            }
+        } else if current_line.len() + 1 + word.len() <= width {
+            current_line.push(' ');
+            current_line.push_str(word);
+        } else {
+            lines.push(current_line);
+            current_line = word.to_string();
+        }
+    }
+    if !current_line.is_empty() {
+        lines.push(current_line);
+    }
+    lines
+}
+
+/// Truncates a string to fit within a given width, adding "…" if truncated.
+fn truncate_to_width(s: &str, width: usize) -> String {
+    if s.len() <= width {
+        s.to_string()
+    } else if width <= 1 {
+        "…".to_string()
+    } else {
+        format!("{}…", &s[..width - 1])
+    }
 }
 
 /// Renders the terminal capture section (auto-scrolls to bottom).

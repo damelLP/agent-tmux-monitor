@@ -160,6 +160,7 @@ impl RegistryActor {
                 tmux_pane,
                 agent_id,
                 agent_type,
+                prompt,
                 respond_to,
             } => {
                 let result = self.handle_apply_hook_event(
@@ -171,6 +172,7 @@ impl RegistryActor {
                     tmux_pane,
                     agent_id,
                     agent_type,
+                    prompt,
                 );
                 let _ = respond_to.send(result);
             }
@@ -652,6 +654,7 @@ impl RegistryActor {
         tmux_pane: Option<String>,
         agent_id: Option<String>,
         agent_type: Option<String>,
+        prompt: Option<String>,
     ) -> Result<(), RegistryError> {
         // Handle SubagentStart: record pending child correlation
         if event_type == HookEventType::SubagentStart {
@@ -764,6 +767,11 @@ impl RegistryActor {
                             } else {
                                 session.apply_hook_event(event_type, tool_name.as_deref());
                             }
+                            if event_type == HookEventType::UserPromptSubmit {
+                                if let Some(ref pr) = prompt {
+                                    session.set_first_prompt(pr);
+                                }
+                            }
                             if let Some(ref name) = tool_name {
                                 infra.record_tool_use(name, None);
                             }
@@ -799,6 +807,13 @@ impl RegistryActor {
             session.apply_notification(notification_type.as_deref());
         } else {
             session.apply_hook_event(event_type, tool_name.as_deref());
+        }
+
+        // Store first user prompt if this is a UserPromptSubmit event
+        if event_type == HookEventType::UserPromptSubmit {
+            if let Some(ref p) = prompt {
+                session.set_first_prompt(p);
+            }
         }
 
         // Update tmux_pane if provided by hook (fills in for discovered sessions)
@@ -1280,7 +1295,7 @@ mod tests {
             tmux_pane: None,
             agent_id: None,
             agent_type: None,
-
+            prompt: None,
             respond_to: tx,
         });
 
@@ -1327,7 +1342,7 @@ mod tests {
             tmux_pane: None,
             agent_id: None,
             agent_type: None,
-
+            prompt: None,
             respond_to: tx,
         });
 
@@ -1363,7 +1378,7 @@ mod tests {
             tmux_pane: None,
             agent_id: None,
             agent_type: None,
-
+            prompt: None,
             respond_to: tx,
         });
 
@@ -1620,7 +1635,7 @@ mod tests {
             tmux_pane: None,
             agent_id: Some("agent-abc-123".to_string()),
             agent_type: Some("explore".to_string()),
-
+            prompt: None,
             respond_to: tx,
         });
 
@@ -1652,7 +1667,7 @@ mod tests {
             tmux_pane: None,
             agent_id: Some("agent-xyz-456".to_string()),
             agent_type: Some("plan".to_string()),
-
+            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
@@ -1668,7 +1683,7 @@ mod tests {
             tmux_pane: None,
             agent_id: Some("agent-xyz-456".to_string()),
             agent_type: None,
-
+            prompt: None,
             respond_to: tx,
         });
 
@@ -1700,7 +1715,7 @@ mod tests {
             tmux_pane: None,
             agent_id: Some("agent-expired".to_string()),
             agent_type: Some("explore".to_string()),
-
+            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
@@ -1750,7 +1765,7 @@ mod tests {
             tmux_pane: None,
             agent_id: Some("sub-agent-001".to_string()),
             agent_type: Some("explore".to_string()),
-
+            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
