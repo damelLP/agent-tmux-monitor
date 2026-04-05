@@ -155,17 +155,10 @@ enum Command {
     },
     /// One-line status summary (for tmux status bar)
     Status,
-    /// Launch a tmux workspace with ATM sidebar, agent, and shell
+    /// Launch or attach to a tmux workspace with ATM sidebar
     Workspace {
-        /// Session name (default: current directory basename)
-        #[arg(long)]
-        name: Option<String>,
-        /// Use isolated tmux server (separate from your main tmux)
-        #[arg(long)]
-        isolate: bool,
-        /// Include an editor pane alongside the agent
-        #[arg(long)]
-        editor: bool,
+        #[command(subcommand)]
+        action: WorkspaceAction,
     },
     /// Apply a layout template
     Layout {
@@ -177,6 +170,30 @@ enum Command {
         /// Split the current pane in-place (default: create new window)
         #[arg(long)]
         in_place: bool,
+    },
+}
+
+#[derive(Debug, Clone, Subcommand)]
+enum WorkspaceAction {
+    /// Create a new tmux workspace with ATM sidebar, agent, and shell
+    Create {
+        /// Session name (default: current directory basename)
+        #[arg(long)]
+        name: Option<String>,
+        /// Use isolated tmux server (separate from your main tmux)
+        #[arg(long)]
+        isolate: bool,
+        /// Include an editor pane alongside the agent
+        #[arg(long)]
+        editor: bool,
+    },
+    /// Inject ATM sidebar into an existing tmux session
+    Attach {
+        /// Target session name (default: most recently attached session)
+        session: Option<String>,
+        /// Use isolated tmux server (-L atm-<name>)
+        #[arg(long)]
+        isolate: bool,
     },
 }
 
@@ -1241,116 +1258,55 @@ async fn cmd_status() -> Result<()> {
 }
 
 // ============================================================================
-// Workspace Command
+// Workspace Helpers
 // ============================================================================
 
-fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()> {
-    const SIDEBAR_PCT: u32 = 16;
-    const SIDEBAR_MIN: u32 = 20;
-    const SIDEBAR_MAX: u32 = 40;
+const SIDEBAR_PCT: u32 = 16;
+const SIDEBAR_MIN: u32 = 20;
+const SIDEBAR_MAX: u32 = 40;
 
-    // 1. Determine session name, sanitized to safe characters
-    let session_name = name.unwrap_or_else(|| {
-        std::env::current_dir()
-            .ok()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_else(|| "atm-workspace".to_string())
-    });
-    if session_name.contains(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.') {
-        bail!("Session name '{}' contains unsupported characters (use alphanumeric, -, _, .)", session_name);
+/// Run a tmux command with optional socket, return stdout.
+fn tmux_run(socket: &Option<String>, args: &[&str]) -> Result<String> {
+    let mut cmd = std::process::Command::new("tmux");
+    if let Some(ref s) = socket {
+        cmd.arg("-L").arg(s);
     }
-
-    // 2. Build tmux base command args (handles --isolate socket)
-    let socket_name = if isolate {
-        Some(format!("atm-{session_name}"))
-    } else {
-        None
-    };
-
-    /// Helper: run a tmux command with optional socket, return stdout.
-    fn tmux_run(socket: &Option<String>, args: &[&str]) -> Result<String> {
-        let mut cmd = std::process::Command::new("tmux");
-        if let Some(ref s) = socket {
-            cmd.arg("-L").arg(s);
-        }
-        cmd.args(args);
-        let output = cmd.output().context("Failed to run tmux")?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            bail!("tmux {:?} failed: {}", args, stderr.trim());
-        }
-        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    cmd.args(args);
+    let output = cmd.output().context("Failed to run tmux")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("tmux {:?} failed: {}", args, stderr.trim());
     }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
 
-    // 3. Check if session already exists
-    let has_session = tmux_run(&socket_name, &["has-session", "-t", &session_name]);
-    if has_session.is_ok() {
-        if isolate {
-            bail!(
-                "Workspace '{}' already exists on socket 'atm-{}'. \
-                 Attach with: tmux -L atm-{} attach-session -t {}",
-                session_name, session_name, session_name, session_name
-            );
-        } else {
-            bail!(
-                "Workspace '{}' already exists. \
-                 Attach with: tmux attach-session -t {}",
-                session_name, session_name
-            );
-        }
+/// Calculate sidebar width from terminal columns, clamped to [SIDEBAR_MIN, SIDEBAR_MAX].
+fn sidebar_width(cols: u16) -> u32 {
+    (cols as u32 * SIDEBAR_PCT / 100).clamp(SIDEBAR_MIN, SIDEBAR_MAX)
+}
+
+/// Validate a session name (alphanumeric, -, _, . only).
+fn validate_session_name(name: &str) -> Result<()> {
+    if name.contains(|c: char| !c.is_alphanumeric() && c != '-' && c != '_' && c != '.') {
+        bail!(
+            "Session name '{}' contains unsupported characters (use alphanumeric, -, _, .)",
+            name
+        );
     }
+    Ok(())
+}
 
-    // 4. Create session at current terminal size so absolute pane sizes
-    //    (like -l 30) are preserved when we attach later.
-    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
-    let cols_str = cols.to_string();
-    let rows_str = rows.to_string();
-    let agent_pane = tmux_run(
-        &socket_name,
-        &[
-            "new-session", "-d", "-s", &session_name,
-            "-x", &cols_str, "-y", &rows_str,
-            "-P", "-F", "#{pane_id}",
-        ],
-    )?;
+/// Default session name from current directory basename.
+fn default_session_name() -> String {
+    std::env::current_dir()
+        .ok()
+        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
+        .unwrap_or_else(|| "atm-workspace".to_string())
+}
 
-    // 5. Split: ATM sidebar on the left — SIDEBAR_PCT% of width, clamped
-    let sidebar_width = (cols as u32 * SIDEBAR_PCT / 100)
-        .clamp(SIDEBAR_MIN, SIDEBAR_MAX)
-        .to_string();
-    let atm_pane = tmux_run(
-        &socket_name,
-        &["split-window", "-hb", "-t", &agent_pane, "-l", &sidebar_width, "-P", "-F", "#{pane_id}"],
-    )?;
-
-    // 6. Split: shell below the agent pane (20% height)
-    tmux_run(
-        &socket_name,
-        &["split-window", "-v", "-t", &agent_pane, "-l", "20%", "-P", "-F", "#{pane_id}"],
-    )?;
-
-    // 7. If --editor: split agent pane horizontally, editor on the left
-    if editor {
-        tmux_run(
-            &socket_name,
-            &["split-window", "-hb", "-t", &agent_pane, "-l", "50%", "-P", "-F", "#{pane_id}"],
-        )?;
-    }
-
-    // 8. Launch claude in agent pane
-    tmux_run(&socket_name, &["send-keys", "-t", &agent_pane, "claude", "Enter"])?;
-
-    // 9. Tag the ATM pane so resize hooks can find it
-    tmux_run(&socket_name, &["select-pane", "-t", &atm_pane, "-T", "atm-sidebar"])?;
-
-    // 10. Launch ATM TUI in sidebar (filtered to this session)
-    let atm_cmd = format!("atm --compact --tmux-session '{session_name}'");
-    tmux_run(&socket_name, &["send-keys", "-t", &atm_pane, &atm_cmd, "Enter"])?;
-
-    // 11. Auto-rescale sidebar on terminal resize + prefix-R keybinding.
-    //     Write a resize script to avoid tmux's $ escaping issues, then
-    //     point the hook and keybinding at it.
-    let tmux_prefix = match &socket_name {
+/// Write the resize-sidebar script and install the after-resize-window hook + prefix-R keybinding.
+fn install_resize_hooks(socket: &Option<String>, session_name: &str) -> Result<()> {
+    let tmux_prefix = match socket {
         Some(s) => format!("tmux -L {s}"),
         None => "tmux".to_string(),
     };
@@ -1383,37 +1339,101 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
     }
     let hook_cmd = format!("run-shell '{}'", script_path.display());
     tmux_run(
-        &socket_name,
-        &["set-hook", "-t", &session_name, "after-resize-window", &hook_cmd],
+        socket,
+        &["set-hook", "-t", session_name, "after-resize-window", &hook_cmd],
     )?;
     // NOTE: bind-key is global; the last workspace created wins for prefix-R.
-    tmux_run(
-        &socket_name,
-        &["bind-key", "-T", "prefix", "R", &hook_cmd],
+    tmux_run(socket, &["bind-key", "-T", "prefix", "R", &hook_cmd])?;
+    Ok(())
+}
+
+/// Inject an ATM sidebar into a target pane. Returns the sidebar pane ID.
+fn inject_sidebar(
+    socket: &Option<String>,
+    target_pane: &str,
+    session_name: &str,
+    cols: u16,
+) -> Result<String> {
+    let width = sidebar_width(cols).to_string();
+    let atm_pane = tmux_run(
+        socket,
+        &[
+            "split-window", "-hb", "-t", target_pane, "-l", &width,
+            "-P", "-F", "#{pane_id}",
+        ],
     )?;
+    // Tag with both a pane title (for resize script) and a user option (for reliable detection).
+    // Pane titles can be overwritten by the shell if ATM crashes; @atm-sidebar persists.
+    tmux_run(socket, &["select-pane", "-t", &atm_pane, "-T", "atm-sidebar"])?;
+    tmux_run(socket, &["set-option", "-p", "-t", &atm_pane, "@atm-sidebar", "1"])?;
+    let atm_cmd = format!("atm --compact --tmux-session '{session_name}'");
+    tmux_run(socket, &["send-keys", "-t", &atm_pane, &atm_cmd, "Enter"])?;
+    Ok(atm_pane)
+}
 
-    // 12. Focus the agent pane
-    tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;
-
-    // 13. Attach to the session
-    let mut attach = std::process::Command::new("tmux");
-    if let Some(ref socket) = socket_name {
-        attach.arg("-L").arg(socket);
+/// Write the inject-sidebar script for the after-new-window hook.
+fn install_new_window_hook(socket: &Option<String>, session_name: &str) -> Result<()> {
+    let tmux_prefix = match socket {
+        Some(s) => format!("tmux -L {s}"),
+        None => "tmux".to_string(),
+    };
+    let script_dir = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("atm");
+    std::fs::create_dir_all(&script_dir)?;
+    let script_path = script_dir.join(format!("inject-sidebar-{session_name}.sh"));
+    std::fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\n\
+             W=$({tmux} display-message -p '#{{window_width}}')\n\
+             S=$((W * {pct} / 100))\n\
+             [ $S -lt {min} ] && S={min}\n\
+             [ $S -gt {max} ] && S={max}\n\
+             ORIG=$({tmux} display-message -p '#{{pane_id}}')\n\
+             PANE=$({tmux} split-window -hb -l $S -P -F '#{{pane_id}}')\n\
+             {tmux} select-pane -t \"$PANE\" -T atm-sidebar\n\
+             {tmux} set-option -p -t \"$PANE\" @atm-sidebar 1\n\
+             {tmux} send-keys -t \"$PANE\" \"atm --compact --tmux-session '{session}'\" Enter\n\
+             {tmux} select-pane -t \"$ORIG\"\n",
+            tmux = tmux_prefix,
+            pct = SIDEBAR_PCT,
+            min = SIDEBAR_MIN,
+            max = SIDEBAR_MAX,
+            session = session_name,
+        ),
+    )?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755))?;
     }
-    attach.arg("attach-session").arg("-t").arg(&session_name);
+    let hook_cmd = format!("run-shell '{}'", script_path.display());
+    tmux_run(
+        socket,
+        &["set-hook", "-t", session_name, "after-new-window", &hook_cmd],
+    )?;
+    Ok(())
+}
 
-    // On Unix, use exec to replace the current process
+/// Exec into `tmux attach-session` (replaces the current process on Unix).
+fn exec_attach(socket: &Option<String>, session_name: &str) -> Result<()> {
+    let mut cmd = std::process::Command::new("tmux");
+    if let Some(ref s) = socket {
+        cmd.arg("-L").arg(s);
+    }
+    cmd.arg("attach-session").arg("-t").arg(session_name);
+
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
-        let err = attach.exec();
-        // exec only returns on error
+        let err = cmd.exec();
         bail!("Failed to attach to tmux session: {err}");
     }
 
     #[cfg(not(unix))]
     {
-        let status = attach
+        let status = cmd
             .status()
             .context("Failed to attach to tmux session")?;
         if !status.success() {
@@ -1421,6 +1441,202 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
         }
         Ok(())
     }
+}
+
+// ============================================================================
+// Workspace Create
+// ============================================================================
+
+fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()> {
+
+    // 1. Determine session name, sanitized to safe characters
+    let session_name = name.unwrap_or_else(default_session_name);
+    validate_session_name(&session_name)?;
+
+    // 2. Build tmux base command args (handles --isolate socket)
+    let socket_name = if isolate {
+        Some(format!("atm-{session_name}"))
+    } else {
+        None
+    };
+
+    // 3. Check if session already exists
+    let has_session = tmux_run(&socket_name, &["has-session", "-t", &session_name]);
+    if has_session.is_ok() {
+        if isolate {
+            bail!(
+                "Workspace '{}' already exists on socket 'atm-{}'. \
+                 Attach with: atm workspace attach {} --isolate",
+                session_name, session_name, session_name
+            );
+        } else {
+            bail!(
+                "Workspace '{}' already exists. \
+                 Attach with: atm workspace attach {}",
+                session_name, session_name
+            );
+        }
+    }
+
+    // 4. Create session at current terminal size so absolute pane sizes
+    //    (like -l 30) are preserved when we attach later.
+    let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+    let cols_str = cols.to_string();
+    let rows_str = rows.to_string();
+    let agent_pane = tmux_run(
+        &socket_name,
+        &[
+            "new-session", "-d", "-s", &session_name,
+            "-x", &cols_str, "-y", &rows_str,
+            "-P", "-F", "#{pane_id}",
+        ],
+    )?;
+
+    // 5. Inject ATM sidebar on the left
+    inject_sidebar(&socket_name, &agent_pane, &session_name, cols)?;
+
+    // 6. Split: shell below the agent pane (20% height)
+    tmux_run(
+        &socket_name,
+        &["split-window", "-v", "-t", &agent_pane, "-l", "20%", "-P", "-F", "#{pane_id}"],
+    )?;
+
+    // 7. If --editor: split agent pane horizontally, editor on the left
+    if editor {
+        tmux_run(
+            &socket_name,
+            &["split-window", "-hb", "-t", &agent_pane, "-l", "50%", "-P", "-F", "#{pane_id}"],
+        )?;
+    }
+
+    // 8. Launch claude in agent pane
+    tmux_run(&socket_name, &["send-keys", "-t", &agent_pane, "claude", "Enter"])?;
+
+    // 9. Install resize hooks + prefix-R keybinding
+    install_resize_hooks(&socket_name, &session_name)?;
+
+    // 10. Focus the agent pane and attach
+    tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;
+    exec_attach(&socket_name, &session_name)
+}
+
+// ============================================================================
+// Workspace Attach
+// ============================================================================
+
+fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
+    // 1. Resolve target session
+    let (session_name, socket_name) = if let Some(name) = session {
+        validate_session_name(&name)?;
+        let socket = if isolate {
+            Some(format!("atm-{name}"))
+        } else {
+            None
+        };
+        (name, socket)
+    } else {
+        // Auto-pick most recently attached session
+        let socket = if isolate {
+            // For isolate without a name, we can't know which socket to use
+            bail!(
+                "Session name is required with --isolate. \
+                 Usage: atm workspace attach <session> --isolate"
+            );
+        } else {
+            None
+        };
+        let output = tmux_run(
+            &socket,
+            &["list-sessions", "-F", "#{session_last_attached} #{session_name}"],
+        )?;
+        let mut sessions: Vec<_> = output
+            .lines()
+            .filter_map(|line| {
+                let mut parts = line.splitn(2, ' ');
+                let ts: u64 = parts.next()?.parse().ok()?;
+                let name = parts.next()?.to_string();
+                Some((ts, name))
+            })
+            .collect();
+        sessions.sort_by(|a, b| b.0.cmp(&a.0)); // most recent first
+        let session_name = sessions
+            .into_iter()
+            .next()
+            .map(|(_, name)| name)
+            .ok_or_else(|| anyhow::anyhow!("No tmux sessions found"))?;
+        (session_name, socket)
+    };
+
+    // 2. Verify session exists
+    if tmux_run(&socket_name, &["has-session", "-t", &session_name]).is_err() {
+        if let Some(ref s) = socket_name {
+            bail!("Session '{}' not found on socket '{}'", session_name, s);
+        } else {
+            bail!("Session '{}' not found", session_name);
+        }
+    }
+
+    // 3. List all windows and their panes, inject sidebar where needed
+    let windows_output = tmux_run(
+        &socket_name,
+        &[
+            "list-windows", "-t", &session_name,
+            "-F", "#{window_id} #{window_width}",
+        ],
+    )?;
+
+    for line in windows_output.lines() {
+        let mut parts = line.splitn(2, ' ');
+        let window_id = parts.next().unwrap_or_default();
+        let cols: u16 = parts
+            .next()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or(80);
+        // Check if this window already has an atm-sidebar pane (using @atm-sidebar option,
+        // which survives ATM crashes unlike pane titles that the shell can overwrite)
+        let panes_output = tmux_run(
+            &socket_name,
+            &[
+                "list-panes", "-t", window_id,
+                "-F", "#{pane_id}:#{@atm-sidebar}",
+            ],
+        )?;
+
+        let has_sidebar = panes_output.lines().any(|line| line.ends_with(":1"));
+        if has_sidebar {
+            continue;
+        }
+
+        // Pick the first pane in the window as the split target
+        let first_pane = panes_output
+            .lines()
+            .next()
+            .and_then(|line| line.split(':').next())
+            .ok_or_else(|| anyhow::anyhow!("Window {} has no panes", window_id))?;
+
+        inject_sidebar(&socket_name, first_pane, &session_name, cols)
+            .with_context(|| format!(
+                "Failed to inject sidebar into window {window_id}; \
+                 re-run `atm workspace attach` to complete injection"
+            ))?;
+    }
+
+    // 5. Install hooks for resize and new windows
+    install_resize_hooks(&socket_name, &session_name)?;
+    install_new_window_hook(&socket_name, &session_name)?;
+
+    // 6. Run the resize script once to correct sidebar widths before attaching
+    let script_path = dirs::data_local_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("/tmp"))
+        .join("atm")
+        .join(format!("resize-sidebar-{session_name}.sh"));
+    let _ = tmux_run(
+        &socket_name,
+        &["run-shell", &format!("{}", script_path.display())],
+    );
+
+    // 7. Attach
+    exec_attach(&socket_name, &session_name)
 }
 
 // ============================================================================
@@ -1515,12 +1731,17 @@ async fn main() -> Result<()> {
         Some(Command::Status) => {
             return cmd_status().await;
         }
-        Some(Command::Workspace {
-            name,
-            isolate,
-            editor,
-        }) => {
-            return cmd_workspace(name, isolate, editor);
+        Some(Command::Workspace { action }) => {
+            return match action {
+                WorkspaceAction::Create {
+                    name,
+                    isolate,
+                    editor,
+                } => cmd_workspace(name, isolate, editor),
+                WorkspaceAction::Attach { session, isolate } => {
+                    cmd_workspace_attach(session, isolate)
+                }
+            };
         }
         Some(Command::Layout {
             name,
