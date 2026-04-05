@@ -317,15 +317,26 @@ pub fn render_terminal_capture(
         return;
     }
 
-    let inner_height = area.height.saturating_sub(2) as usize;
-    let start = captured_output.len().saturating_sub(inner_height);
     let visible_lines: Vec<Line<'_>> = captured_output
         .iter()
-        .skip(start)
         .map(|l| Line::from(Span::raw(l.as_str())))
         .collect();
 
-    let paragraph = Paragraph::new(visible_lines).block(block);
+    // Use wrap + scroll to bottom so long lines wrap and we auto-scroll
+    let inner_width = area.width.saturating_sub(2) as usize;
+    let inner_height = area.height.saturating_sub(2) as usize;
+
+    // Estimate wrapped line count for scroll offset
+    let wrapped_count: usize = captured_output
+        .iter()
+        .map(|l| if l.is_empty() { 1 } else { (l.len().max(1) + inner_width - 1) / inner_width.max(1) })
+        .sum();
+    let scroll = wrapped_count.saturating_sub(inner_height) as u16;
+
+    let paragraph = Paragraph::new(visible_lines)
+        .block(block)
+        .wrap(ratatui::widgets::Wrap { trim: false })
+        .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
 }
 
