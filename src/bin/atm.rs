@@ -522,11 +522,18 @@ async fn run_event_loop(
                                             let escaped = dir.replace('\'', "'\\''");
                                             cmd = format!("cd '{escaped}' && {cmd}");
                                         }
+                                        // Split without a command to get an interactive shell
+                                        // (ensures claude is on PATH), then send-keys.
                                         match client
-                                            .split_window(target, "50%", direction, Some(&cmd))
+                                            .split_window(target, "50%", direction, None)
                                             .await
                                         {
                                             Ok(pane_id) => {
+                                                if let Err(e) = client.send_keys(&pane_id, &cmd).await {
+                                                    warn!(error = %e, "Failed to send command to pane");
+                                                } else if let Err(e) = client.send_keys(&pane_id, "Enter").await {
+                                                    warn!(error = %e, "Failed to send Enter to pane");
+                                                }
                                                 info!(pane_id = %pane_id, ?direction, "Spawned new agent")
                                             }
                                             Err(e) => warn!(error = %e, "Failed to spawn agent"),
@@ -805,10 +812,22 @@ async fn cmd_spawn(
     }
 
     let pane_dir: atm_tmux::PaneDirection = direction.into();
+    // Split without a command so the pane gets an interactive shell (which has
+    // claude on PATH).  Then send the command via send-keys, matching the
+    // approach used by `workspace create`.
     let new_pane = client
-        .split_window(current_pane, &size, pane_dir, Some(&claude_cmd))
+        .split_window(current_pane, &size, pane_dir, None)
         .await
         .context("Failed to split tmux pane")?;
+
+    client
+        .send_keys(&new_pane, &claude_cmd)
+        .await
+        .context("Failed to send command to new pane")?;
+    client
+        .send_keys(&new_pane, "Enter")
+        .await
+        .context("Failed to send Enter to new pane")?;
 
     println!("{new_pane}");
     Ok(())
