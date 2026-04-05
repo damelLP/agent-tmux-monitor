@@ -262,10 +262,12 @@ pub fn render_compact_preview(
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 )));
                 if let Some(ref desc) = task.description {
-                    result.push(Line::from(Span::styled(
-                        desc.clone(),
-                        Style::default().fg(Color::White),
-                    )));
+                    for line in desc.lines() {
+                        result.push(Line::from(Span::styled(
+                            line.to_string(),
+                            Style::default().fg(Color::White),
+                        )));
+                    }
                 }
             }
 
