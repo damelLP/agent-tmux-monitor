@@ -227,20 +227,24 @@ fn build_progress_bar(percentage: f64, width: usize) -> String {
     )
 }
 
-/// Renders the compact preview pane: beads task + prompt summary, then terminal capture.
+/// Renders the compact preview pane: beads task + first prompt summary.
 ///
-/// Content:
-/// - Beads in-progress task title (if found at project root)
-/// - First user prompt (word-wrapped by ratatui)
-/// - Terminal capture below (auto-scrolls to bottom)
+/// Content (word-wrapped to fill available space):
+/// - Beads in-progress task title (cyan, bold)
+/// - First user prompt
+/// - Fallback: status info if nothing else available
 pub fn render_compact_preview(
     frame: &mut Frame,
     area: Rect,
     session: Option<&SessionView>,
-    captured_output: &[String],
+    _captured_output: &[String],
 ) {
-    // Build summary text (beads task + first prompt)
-    let summary_text: Vec<Line<'_>> = match session {
+    let block = Block::default()
+        .title(" Summary ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let lines: Vec<Line<'_>> = match session {
         Some(s) => {
             let mut result: Vec<Line<'_>> = Vec::new();
 
@@ -266,125 +270,29 @@ pub fn render_compact_preview(
                 )));
             }
 
+            // Fallback: status info
+            if result.is_empty() {
+                let status_line = match &s.activity_detail {
+                    Some(detail) => format!("{} ({})", s.status_label, detail),
+                    None => s.status_label.clone(),
+                };
+                result.push(Line::from(Span::styled(
+                    status_line,
+                    Style::default().fg(status_color(s.status)),
+                )));
+            }
+
             result
         }
-        None => Vec::new(),
+        None => vec![
+            Line::from(Span::styled("No session selected", Style::default().fg(Color::DarkGray))),
+        ],
     };
 
-    let has_summary = !summary_text.is_empty();
-
-    if !has_summary {
-        // No summary — give all space to terminal capture
-        render_terminal_capture(frame, area, captured_output);
-        return;
-    }
-
-    // Split: summary gets ~40% (min 4 lines), terminal gets rest
-    let [summary_area, capture_area] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Percentage(40),
-            Constraint::Min(3),
-        ])
-        .areas(area);
-
-    let block = Block::default()
-        .title(" Summary ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-    let paragraph = Paragraph::new(summary_text)
+    let paragraph = Paragraph::new(lines)
         .block(block)
         .wrap(ratatui::widgets::Wrap { trim: false });
-    frame.render_widget(paragraph, summary_area);
-
-    render_terminal_capture(frame, capture_area, captured_output);
-}
-
-/// Renders the terminal capture section (auto-scrolls to bottom).
-pub fn render_terminal_capture(
-    frame: &mut Frame,
-    area: Rect,
-    captured_output: &[String],
-) {
-    let block = Block::default()
-        .title(" Terminal ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::DarkGray));
-
-    if captured_output.is_empty() {
-        let paragraph = Paragraph::new("").block(block);
-        frame.render_widget(paragraph, area);
-        return;
-    }
-
-    // Strip ANSI escape codes from captured output for clean rendering.
-    // Terminal capture may contain color codes, cursor movement, etc.
-    let stripped: Vec<String> = captured_output
-        .iter()
-        .map(|l| strip_ansi_codes(l))
-        .collect();
-
-    let inner_height = area.height.saturating_sub(2) as usize;
-
-    // Take only the last N lines to keep rendering fast, then let ratatui wrap
-    let tail_start = stripped.len().saturating_sub(inner_height * 3); // 3x headroom for wrapping
-    let visible_lines: Vec<Line<'_>> = stripped[tail_start..]
-        .iter()
-        .map(|l| Line::from(Span::raw(l.as_str())))
-        .collect();
-
-    // Scroll to bottom: use a large value, ratatui clamps it
-    let scroll = visible_lines.len().saturating_sub(1) as u16;
-
-    let paragraph = Paragraph::new(visible_lines)
-        .block(block)
-        .wrap(ratatui::widgets::Wrap { trim: false })
-        .scroll((scroll, 0));
     frame.render_widget(paragraph, area);
-}
-
-/// Strips ANSI escape sequences from a string.
-fn strip_ansi_codes(s: &str) -> String {
-    let mut result = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            // Skip ESC [ ... <final byte> sequences (CSI)
-            if chars.peek() == Some(&'[') {
-                chars.next(); // consume '['
-                // Consume parameter bytes (0x30-0x3F) and intermediate bytes (0x20-0x2F)
-                // until final byte (0x40-0x7E)
-                loop {
-                    match chars.peek() {
-                        Some(&c) if ('\x40'..='\x7e').contains(&c) => {
-                            chars.next(); // consume final byte
-                            break;
-                        }
-                        Some(_) => { chars.next(); }
-                        None => break,
-                    }
-                }
-            }
-            // Skip ESC ] ... ST sequences (OSC) — terminated by BEL or ESC \
-            else if chars.peek() == Some(&']') {
-                chars.next();
-                loop {
-                    match chars.next() {
-                        Some('\x07') => break, // BEL
-                        Some('\x1b') if chars.peek() == Some(&'\\') => {
-                            chars.next();
-                            break;
-                        }
-                        Some(_) => {}
-                        None => break,
-                    }
-                }
-            }
-        } else {
-            result.push(c);
-        }
-    }
-    result
 }
 
 #[cfg(test)]
