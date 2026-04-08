@@ -509,7 +509,7 @@ async fn run_event_loop(
                                             })
                                             .max_by_key(|p| (p.width as u32) * (p.height as u32))
                                             .map(|p| p.pane_id.as_str())
-                                            .or(panes.iter().find(|p| p.is_active).map(|p| p.pane_id.as_str()))
+                                            .or(atm_pane.as_deref())
                                             .unwrap_or("%0");
                                         // Query the target pane's cwd for the new agent
                                         let cwd = client
@@ -778,15 +778,22 @@ async fn cmd_spawn(
         claude_cmd.push_str(&format!(" --model {m}"));
     }
 
-    // Get current pane to split from
+    // Get current pane to split from.
+    // Prefer $TMUX_PANE which tmux sets to the calling pane's ID in run-shell.
+    // Fall back to is_active heuristic only when env var is unavailable.
+    let tmux_pane_env = std::env::var("TMUX_PANE").ok().filter(|s| !s.is_empty());
     let panes = client
         .list_panes()
         .await
         .context("Failed to list tmux panes")?;
-    let current_pane = panes
-        .iter()
-        .find(|p| p.is_active)
-        .map(|p| p.pane_id.as_str())
+    let current_pane = tmux_pane_env
+        .as_deref()
+        .or_else(|| {
+            panes
+                .iter()
+                .find(|p| p.is_active)
+                .map(|p| p.pane_id.as_str())
+        })
         .unwrap_or("%0");
 
     // Determine working directory: explicit worktree flag, or query the target pane's cwd
