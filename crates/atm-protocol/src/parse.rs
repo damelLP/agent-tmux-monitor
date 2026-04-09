@@ -137,7 +137,8 @@ impl RawStatusLine {
 
     /// Updates an existing SessionDomain with new data.
     /// Only updates fields that are present in this status line.
-    pub fn update_session(&self, session: &mut SessionDomain) {
+    /// Returns `true` if the working directory changed.
+    pub fn update_session(&self, session: &mut SessionDomain) -> bool {
         use atm_core::Model;
 
         // Update model if present (fills in Unknown for discovered/hook-created sessions)
@@ -183,7 +184,7 @@ impl RawStatusLine {
             version: self.version.clone(),
         };
 
-        session.update_from_status_line(&data);
+        session.update_from_status_line(&data)
     }
 }
 

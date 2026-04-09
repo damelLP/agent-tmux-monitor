@@ -258,6 +258,7 @@ async fn test_event_subscription_hook_event_update() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await
         .unwrap();
@@ -527,6 +528,7 @@ async fn test_hook_event_pre_tool_use() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await
         .expect("should apply hook event");
@@ -559,6 +561,7 @@ async fn test_hook_event_post_tool_use() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await
         .unwrap();
@@ -574,6 +577,7 @@ async fn test_hook_event_post_tool_use() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await
         .expect("should apply hook event");
@@ -603,6 +607,7 @@ async fn test_hook_event_nonexistent_session() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await;
 
@@ -635,6 +640,7 @@ async fn test_hook_event_session_end() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await
         .expect("should apply SessionEnd event");
@@ -681,6 +687,7 @@ async fn test_hook_event_session_end_nonexistent() {
             None, // tmux_pane
             None, // agent_id
             None, // agent_type
+            None, // prompt
         )
         .await;
 
@@ -920,6 +927,7 @@ async fn test_hook_event_forwards_agent_fields() {
             None,
             Some("subagent-001".to_string()),
             Some("explore".to_string()),
+            None, // prompt
         )
         .await
         .expect("SubagentStart hook should succeed");
@@ -988,5 +996,262 @@ async fn test_project_resolution_on_discovery() {
     assert!(
         view.working_directory.is_some(),
         "working_directory should be populated from discovery"
+    );
+}
+
+// ============================================================================
+// CWD Change Detection Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_status_line_cwd_change_updates_git_info() {
+    let handle = spawn_registry();
+
+    // Create two temp repos to simulate a worktree switch
+    let dir = tempfile::tempdir().unwrap();
+    let repo_a = dir.path().join("repo-a");
+    let repo_b = dir.path().join("repo-b");
+    std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+    std::fs::create_dir_all(repo_b.join(".git")).unwrap();
+    std::fs::write(repo_a.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(repo_b.join(".git/HEAD"), "ref: refs/heads/feature-x\n").unwrap();
+
+    let current_pid = std::process::id();
+
+    // Register via discovery in repo_a
+    handle
+        .register_discovered(
+            SessionId::new("cwd-change-test"),
+            current_pid,
+            repo_a.clone(),
+            None,
+        )
+        .await
+        .expect("should register");
+
+    let view = handle
+        .get_session(SessionId::new("cwd-change-test"))
+        .await
+        .unwrap();
+    assert_eq!(view.worktree_branch.as_deref(), Some("main"));
+    assert_eq!(view.project_root.as_deref(), Some(repo_a.to_str().unwrap()));
+
+    // Now send a status line update with cwd pointing to repo_b
+    let status_json = serde_json::json!({
+        "session_id": "cwd-change-test",
+        "pid": current_pid,
+        "cwd": repo_b.to_str().unwrap(),
+        "model": {"id": "claude-sonnet-4-20250514"},
+        "cost": {"total_cost_usd": 0.25, "total_duration_ms": 5000},
+        "context_window": {"total_input_tokens": 1000, "context_window_size": 200000}
+    });
+
+    handle
+        .update_from_status_line(SessionId::new("cwd-change-test"), status_json)
+        .await
+        .expect("status update should succeed");
+
+    // Verify git info was re-resolved to repo_b
+    let view = handle
+        .get_session(SessionId::new("cwd-change-test"))
+        .await
+        .unwrap();
+    assert_eq!(
+        view.worktree_branch.as_deref(),
+        Some("feature-x"),
+        "branch should update to repo_b's branch"
+    );
+    assert_eq!(
+        view.project_root.as_deref(),
+        Some(repo_b.to_str().unwrap()),
+        "project_root should update to repo_b"
+    );
+    // Cost should also be updated (not wiped)
+    assert!(
+        view.cost_usd > 0.2,
+        "cost should be updated from status line, got {}",
+        view.cost_usd
+    );
+}
+
+#[tokio::test]
+async fn test_status_line_same_cwd_does_not_re_resolve() {
+    let handle = spawn_registry();
+    let mut rx = handle.subscribe();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("same-cwd-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let current_pid = std::process::id();
+
+    // Register via discovery
+    handle
+        .register_discovered(
+            SessionId::new("same-cwd-test"),
+            current_pid,
+            repo.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Drain events
+    while timeout(Duration::from_millis(50), rx.recv()).await.is_ok() {}
+
+    // Send status line with SAME cwd
+    let status_json = serde_json::json!({
+        "session_id": "same-cwd-test",
+        "pid": current_pid,
+        "cwd": repo.to_str().unwrap(),
+        "model": {"id": "claude-sonnet-4-20250514"},
+        "cost": {"total_cost_usd": 0.10, "total_duration_ms": 1000},
+        "context_window": {"total_input_tokens": 500, "context_window_size": 200000}
+    });
+
+    handle
+        .update_from_status_line(SessionId::new("same-cwd-test"), status_json)
+        .await
+        .unwrap();
+
+    // Session should still have correct info
+    let view = handle
+        .get_session(SessionId::new("same-cwd-test"))
+        .await
+        .unwrap();
+    assert_eq!(view.worktree_branch.as_deref(), Some("main"));
+}
+
+// ============================================================================
+// Metadata Preservation on Rescan Tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_rescan_preserves_metadata_for_existing_pid() {
+    let handle = spawn_registry();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("preserve-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+    let current_pid = std::process::id();
+
+    // Register via discovery with pending-{pid} id
+    handle
+        .register_discovered(
+            SessionId::new("pending-discover"),
+            current_pid,
+            repo.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Upgrade via status line (gives it a real session id and cost data)
+    let status_json = serde_json::json!({
+        "session_id": "real-session-id",
+        "pid": current_pid,
+        "cwd": repo.to_str().unwrap(),
+        "model": {"id": "claude-sonnet-4-20250514"},
+        "cost": {"total_cost_usd": 1.50, "total_duration_ms": 60000},
+        "context_window": {
+            "total_input_tokens": 50000,
+            "total_output_tokens": 10000,
+            "context_window_size": 200000
+        }
+    });
+
+    handle
+        .update_from_status_line(SessionId::new("real-session-id"), status_json)
+        .await
+        .unwrap();
+
+    // Verify cost was accumulated
+    let view = handle
+        .get_session(SessionId::new("real-session-id"))
+        .await
+        .expect("session should exist with real id");
+    assert!(
+        view.cost_usd > 1.0,
+        "cost should be ~1.50, got {}",
+        view.cost_usd
+    );
+
+    // Now simulate a rescan (re-discovery with a new pending id)
+    handle
+        .register_discovered(
+            SessionId::new("pending-rescan"),
+            current_pid,
+            repo.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    // Session should still be accessible and metadata preserved
+    // Note: session_id will have been updated to the new pending id
+    let view = handle
+        .get_session(SessionId::new("pending-rescan"))
+        .await
+        .expect("session should exist under new id");
+    assert!(
+        view.cost_usd > 1.0,
+        "cost should be preserved after rescan (~1.50), got {}",
+        view.cost_usd
+    );
+}
+
+#[tokio::test]
+async fn test_rescan_refreshes_git_info() {
+    let handle = spawn_registry();
+
+    let dir = tempfile::tempdir().unwrap();
+    let repo = dir.path().join("rescan-git-repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/old-branch\n").unwrap();
+
+    let current_pid = std::process::id();
+
+    // Initial discovery
+    handle
+        .register_discovered(
+            SessionId::new("rescan-git-test"),
+            current_pid,
+            repo.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let view = handle
+        .get_session(SessionId::new("rescan-git-test"))
+        .await
+        .unwrap();
+    assert_eq!(view.worktree_branch.as_deref(), Some("old-branch"));
+
+    // Simulate branch change on disk
+    std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/new-branch\n").unwrap();
+
+    // Re-discover (rescan) — should pick up new branch
+    handle
+        .register_discovered(
+            SessionId::new("rescan-git-test-2"),
+            current_pid,
+            repo.clone(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let view = handle
+        .get_session(SessionId::new("rescan-git-test-2"))
+        .await
+        .unwrap();
+    assert_eq!(
+        view.worktree_branch.as_deref(),
+        Some("new-branch"),
+        "rescan should pick up updated branch"
     );
 }

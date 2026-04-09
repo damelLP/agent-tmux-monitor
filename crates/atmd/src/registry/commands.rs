@@ -128,6 +128,13 @@ pub enum RegistryCommand {
     /// Sessions whose Claude Code process has died are removed.
     CleanupStale,
 
+    /// Refresh git info (branch, worktree) for all sessions.
+    ///
+    /// This is a fire-and-forget command used by the git refresh task.
+    /// Re-reads `.git/HEAD` for each session to detect branch switches
+    /// that happen without a working directory change.
+    RefreshGitInfo,
+
     /// Register a discovered session (minimal data from /proc scan).
     ///
     /// Creates a minimal session with defaults that will be filled in

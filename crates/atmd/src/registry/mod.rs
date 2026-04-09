@@ -44,6 +44,9 @@ const EVENT_BUFFER: usize = 100;
 /// Cleanup interval in seconds
 const CLEANUP_INTERVAL_SECS: u64 = 2;
 
+/// Git info refresh interval in seconds
+const GIT_REFRESH_INTERVAL_SECS: u64 = 5;
+
 /// Spawn the registry actor and return a handle for interaction.
 ///
 /// This function:
@@ -82,7 +85,10 @@ pub fn spawn_registry() -> RegistryHandle {
     let handle = RegistryHandle::new(cmd_tx.clone(), event_tx);
 
     // Spawn cleanup task
-    spawn_cleanup_task(cmd_tx);
+    spawn_cleanup_task(cmd_tx.clone());
+
+    // Spawn git info refresh task (detects branch switches)
+    spawn_git_refresh_task(cmd_tx);
 
     handle
 }
@@ -103,6 +109,26 @@ fn spawn_cleanup_task(sender: mpsc::Sender<RegistryCommand>) {
             }
 
             debug!("Triggered stale session cleanup");
+        }
+    });
+}
+
+/// Spawn a background task that periodically refreshes git info for all sessions.
+///
+/// Detects branch switches that happen without a working directory change
+/// (e.g., `git checkout other-branch`). The cost is minimal: one stat() + read()
+/// of `.git/HEAD` per tracked session every 5 seconds.
+fn spawn_git_refresh_task(sender: mpsc::Sender<RegistryCommand>) {
+    tokio::spawn(async move {
+        let mut ticker = interval(Duration::from_secs(GIT_REFRESH_INTERVAL_SECS));
+
+        loop {
+            ticker.tick().await;
+
+            if sender.send(RegistryCommand::RefreshGitInfo).await.is_err() {
+                debug!("Git refresh task stopping: registry channel closed");
+                break;
+            }
         }
     });
 }

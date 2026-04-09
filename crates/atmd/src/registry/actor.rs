@@ -199,6 +199,9 @@ impl RegistryActor {
             RegistryCommand::CleanupStale => {
                 self.handle_cleanup_stale();
             }
+            RegistryCommand::RefreshGitInfo => {
+                self.handle_refresh_git_info();
+            }
             RegistryCommand::RegisterDiscovered {
                 session_id,
                 pid,
@@ -344,18 +347,9 @@ impl RegistryActor {
         }
 
         // Check if session already exists for this PID
-        if let Some((existing_session, _)) = self.sessions_by_pid.get(&pid) {
-            // If session_id is different, this is an update (e.g., pending → real)
-            if existing_session.id != session_id {
-                debug!(
-                    old_id = %existing_session.id,
-                    new_id = %session_id,
-                    pid = pid,
-                    "Updating session_id for existing PID"
-                );
-                // We'll handle this via upgrade logic below
-            } else {
-                // Same session_id, same PID - nothing to do
+        if let Some((existing_session, _)) = self.sessions_by_pid.get_mut(&pid) {
+            if existing_session.id == session_id {
+                // Same session_id, same PID — nothing to do
                 debug!(
                     session_id = %session_id,
                     pid = pid,
@@ -363,10 +357,46 @@ impl RegistryActor {
                 );
                 return Ok(());
             }
+
+            // PID exists with a different session_id (e.g., re-discovery of an
+            // upgraded session). Preserve the existing SessionDomain (cost, tokens,
+            // duration, etc.) — only refresh cwd and git info from the new discovery.
+            let old_id = existing_session.id.clone();
+            let cwd_str = cwd.to_string_lossy().to_string();
+
+            // Update session_id to match the new discovery
+            existing_session.id = session_id.clone();
+
+            existing_session.working_directory = Some(cwd_str.clone());
+            existing_session.project_root = atm_core::resolve_project_root(&cwd_str);
+            let (wt_path, wt_branch) = atm_core::resolve_worktree_info(&cwd_str);
+            existing_session.worktree_path = wt_path;
+            existing_session.worktree_branch = wt_branch;
+            if tmux_pane.is_some() {
+                existing_session.tmux_pane = tmux_pane;
+            }
+
+            info!(
+                old_id = %old_id,
+                new_id = %session_id,
+                pid = pid,
+                "Re-discovered existing session, refreshed git info (metadata preserved)"
+            );
+
+            let view = SessionView::from_domain(existing_session);
+            let _ = self.event_publisher.send(SessionEvent::Updated {
+                session: Box::new(view),
+            });
+
+            // Update the session_id index
+            self.session_id_to_pid.remove(&old_id);
+            self.session_id_to_pid.insert(session_id, pid);
+
+            return Ok(());
         }
 
         // Check capacity
-        if !self.sessions_by_pid.contains_key(&pid) && self.sessions_by_pid.len() >= MAX_SESSIONS {
+        if self.sessions_by_pid.len() >= MAX_SESSIONS {
             warn!(
                 session_id = %session_id,
                 current = self.sessions_by_pid.len(),
@@ -376,7 +406,7 @@ impl RegistryActor {
             return Err(RegistryError::RegistryFull { max: MAX_SESSIONS });
         }
 
-        // Create minimal session with defaults
+        // Create minimal session with defaults (genuinely new process)
         use atm_core::{AgentType, Model};
         let mut session = SessionDomain::new(
             session_id.clone(),
@@ -397,25 +427,9 @@ impl RegistryActor {
         session.tmux_pane = tmux_pane;
         let agent_type = session.agent_type.clone();
 
-        // If there's an existing session for this PID, transfer its data
-        let infra = if let Some((old_session, old_infra)) = self.sessions_by_pid.remove(&pid) {
-            // Remove old session_id from index
-            self.session_id_to_pid.remove(&old_session.id);
-
-            // Publish removal event for old session
-            let _ = self.event_publisher.send(SessionEvent::Removed {
-                session_id: old_session.id.clone(),
-                reason: RemovalReason::Upgraded,
-            });
-
-            // Preserve infrastructure data (tool history, update counts, etc.)
-            old_infra
-        } else {
-            // Create new infrastructure with PID
-            let mut infra = SessionInfrastructure::new();
-            infra.set_pid(pid);
-            infra
-        };
+        // Create new infrastructure with PID
+        let mut infra = SessionInfrastructure::new();
+        infra.set_pid(pid);
 
         // Insert into primary storage and index
         self.sessions_by_pid.insert(pid, (session, infra));
@@ -475,12 +489,20 @@ impl RegistryActor {
         // Fallback: lookup by session_id (when no PID available)
         if let Some(&pid) = self.session_id_to_pid.get(&session_id) {
             if let Some((session, infra)) = self.sessions_by_pid.get_mut(&pid) {
-                raw_status.update_session(session);
+                let cwd_changed = raw_status.update_session(session);
                 infra.record_update();
 
-                // Resolve project/worktree if not yet set
-                if session.project_root.is_none() {
+                // Resolve project/worktree if not yet set, or if cwd changed
+                if session.project_root.is_none() || cwd_changed {
                     if let Some(ref cwd) = session.working_directory {
+                        if cwd_changed {
+                            info!(
+                                session_id = %session_id,
+                                pid = pid,
+                                new_cwd = %cwd,
+                                "Working directory changed, re-resolving git info"
+                            );
+                        }
                         session.project_root = atm_core::resolve_project_root(cwd);
                         let (wt_path, wt_branch) = atm_core::resolve_worktree_info(cwd);
                         session.worktree_path = wt_path;
@@ -524,12 +546,20 @@ impl RegistryActor {
             // Update existing session
             let old_session_id = session.id.clone();
 
-            raw_status.update_session(session);
+            let cwd_changed = raw_status.update_session(session);
             infra.record_update();
 
-            // Resolve project/worktree if not yet set
-            if session.project_root.is_none() {
+            // Resolve project/worktree if not yet set, or if cwd changed
+            if session.project_root.is_none() || cwd_changed {
                 if let Some(ref cwd) = session.working_directory {
+                    if cwd_changed {
+                        info!(
+                            session_id = %session.id,
+                            pid = pid,
+                            new_cwd = %cwd,
+                            "Working directory changed, re-resolving git info"
+                        );
+                    }
                     session.project_root = atm_core::resolve_project_root(cwd);
                     let (wt_path, wt_branch) = atm_core::resolve_worktree_info(cwd);
                     session.worktree_path = wt_path;
@@ -1036,6 +1066,51 @@ impl RegistryActor {
                 session_id,
                 reason: RemovalReason::ProcessDied,
             });
+        }
+    }
+
+    /// Refreshes git info (branch, worktree) for all sessions.
+    ///
+    /// Detects branch switches that happen without a working directory change
+    /// (e.g., `git checkout other-branch` in the same directory).
+    fn handle_refresh_git_info(&mut self) {
+        let mut updated_count = 0;
+
+        for (pid, (session, _)) in self.sessions_by_pid.iter_mut() {
+            let cwd = match &session.working_directory {
+                Some(cwd) => cwd.clone(),
+                None => continue,
+            };
+
+            let new_project_root = atm_core::resolve_project_root(&cwd);
+            let (new_wt_path, new_wt_branch) = atm_core::resolve_worktree_info(&cwd);
+
+            let changed = session.project_root != new_project_root
+                || session.worktree_path != new_wt_path
+                || session.worktree_branch != new_wt_branch;
+
+            if changed {
+                info!(
+                    session_id = %session.id,
+                    pid = pid,
+                    old_branch = ?session.worktree_branch,
+                    new_branch = ?new_wt_branch,
+                    "Git info changed, updating session"
+                );
+                session.project_root = new_project_root;
+                session.worktree_path = new_wt_path;
+                session.worktree_branch = new_wt_branch;
+                updated_count += 1;
+
+                let view = SessionView::from_domain(session);
+                let _ = self.event_publisher.send(SessionEvent::Updated {
+                    session: Box::new(view),
+                });
+            }
+        }
+
+        if updated_count > 0 {
+            info!(updated_count, "Git info refresh completed with changes");
         }
     }
 
@@ -1898,6 +1973,261 @@ mod tests {
         assert!(
             old_session.is_none(),
             "Old session ID should not exist anymore"
+        );
+    }
+
+    // ========================================================================
+    // CWD Change Detection Tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn test_refresh_git_info_detects_branch_change() {
+        let (_cmd_tx, mut actor, mut event_rx) = create_actor();
+
+        // Create a temp repo
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("refresh-repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        // Register a discovered session
+        let current_pid = std::process::id();
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("refresh-test"),
+            pid: current_pid,
+            cwd: repo.clone(),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Drain events
+        while event_rx.try_recv().is_ok() {}
+
+        // Verify initial branch
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("refresh-test"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert_eq!(view.worktree_branch.as_deref(), Some("main"));
+
+        // Change branch on disk
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/develop\n").unwrap();
+
+        // Trigger git info refresh
+        actor.handle_command(RegistryCommand::RefreshGitInfo);
+
+        // Verify branch was updated
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("refresh-test"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert_eq!(
+            view.worktree_branch.as_deref(),
+            Some("develop"),
+            "branch should be updated after RefreshGitInfo"
+        );
+
+        // Should have published an Updated event
+        let event = event_rx.try_recv();
+        assert!(
+            matches!(event, Ok(SessionEvent::Updated { .. })),
+            "should publish Updated event on branch change"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_refresh_git_info_no_change_no_event() {
+        let (_cmd_tx, mut actor, mut event_rx) = create_actor();
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("no-change-repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let current_pid = std::process::id();
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("no-change-test"),
+            pid: current_pid,
+            cwd: repo.clone(),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Drain events from registration
+        while event_rx.try_recv().is_ok() {}
+
+        // Trigger refresh without changing anything
+        actor.handle_command(RegistryCommand::RefreshGitInfo);
+
+        // Should NOT publish any event
+        let event = event_rx.try_recv();
+        assert!(
+            event.is_err(),
+            "should NOT publish event when nothing changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_rediscovery_preserves_domain_metadata() {
+        let (_cmd_tx, mut actor, _event_rx) = create_actor();
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("preserve-repo");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::write(repo.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+
+        let current_pid = std::process::id();
+
+        // Register initial discovery
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("pending-1"),
+            pid: current_pid,
+            cwd: repo.clone(),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Upgrade via status line (accumulate cost)
+        let status_json = serde_json::json!({
+            "session_id": "real-id",
+            "pid": current_pid,
+            "cwd": repo.to_str().unwrap(),
+            "model": {"id": "claude-sonnet-4-20250514"},
+            "cost": {"total_cost_usd": 2.50, "total_duration_ms": 120000},
+            "context_window": {
+                "total_input_tokens": 80000,
+                "total_output_tokens": 20000,
+                "context_window_size": 200000
+            }
+        });
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::UpdateFromStatusLine {
+            session_id: SessionId::new("real-id"),
+            data: status_json,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Verify cost accumulated
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("real-id"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert!(view.cost_usd > 2.0, "cost should be ~2.50");
+
+        // Re-discover (simulating rescan)
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("pending-rescan"),
+            pid: current_pid,
+            cwd: repo.clone(),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Verify metadata preserved under new session_id
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("pending-rescan"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert!(
+            view.cost_usd > 2.0,
+            "cost should be preserved after rescan, got {}",
+            view.cost_usd
+        );
+
+        // Old session_id should no longer exist
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("real-id"),
+            respond_to: tx,
+        });
+        let old = rx.await.unwrap();
+        assert!(old.is_none(), "old session_id should be removed from index");
+    }
+
+    #[tokio::test]
+    async fn test_update_from_status_line_cwd_change_re_resolves_git() {
+        let (_cmd_tx, mut actor, _event_rx) = create_actor();
+
+        let dir = tempfile::tempdir().unwrap();
+        let repo_a = dir.path().join("repo-a");
+        let repo_b = dir.path().join("repo-b");
+        std::fs::create_dir_all(repo_a.join(".git")).unwrap();
+        std::fs::create_dir_all(repo_b.join(".git")).unwrap();
+        std::fs::write(repo_a.join(".git/HEAD"), "ref: refs/heads/main\n").unwrap();
+        std::fs::write(repo_b.join(".git/HEAD"), "ref: refs/heads/feature\n").unwrap();
+
+        let current_pid = std::process::id();
+
+        // Register in repo_a
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("cwd-test"),
+            pid: current_pid,
+            cwd: repo_a.clone(),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Verify initial state
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("cwd-test"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert_eq!(view.worktree_branch.as_deref(), Some("main"));
+
+        // Send status line with cwd changed to repo_b
+        let status_json = serde_json::json!({
+            "session_id": "cwd-test",
+            "pid": current_pid,
+            "cwd": repo_b.to_str().unwrap(),
+            "model": {"id": "claude-sonnet-4-20250514"},
+            "cost": {"total_cost_usd": 0.50, "total_duration_ms": 5000},
+            "context_window": {"total_input_tokens": 1000, "context_window_size": 200000}
+        });
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::UpdateFromStatusLine {
+            session_id: SessionId::new("cwd-test"),
+            data: status_json,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Verify git info re-resolved
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("cwd-test"),
+            respond_to: tx,
+        });
+        let view = rx.await.unwrap().unwrap();
+        assert_eq!(
+            view.worktree_branch.as_deref(),
+            Some("feature"),
+            "branch should be re-resolved after cwd change"
+        );
+        assert_eq!(
+            view.project_root.as_deref(),
+            Some(repo_b.to_str().unwrap()),
+            "project_root should point to repo_b"
         );
     }
 }

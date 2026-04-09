@@ -673,7 +673,9 @@ impl SessionDomain {
     ///
     /// When `current_usage` is null in Claude's status line, all current_* values
     /// will be 0, which correctly resets context percentage to 0%.
-    pub fn update_from_status_line(&mut self, data: &StatusLineData) {
+    ///
+    /// Returns `true` if the working directory changed (caller should re-resolve git info).
+    pub fn update_from_status_line(&mut self, data: &StatusLineData) -> bool {
         self.cost = Money::from_usd(data.cost_usd);
         self.duration = SessionDuration::new(data.total_duration_ms, data.api_duration_ms);
         self.lines_changed = LinesChanged::new(data.lines_added, data.lines_removed);
@@ -690,6 +692,17 @@ impl SessionDomain {
         if self.status != SessionStatus::AttentionNeeded {
             self.status = SessionStatus::Working;
         }
+
+        // Detect working directory change
+        let cwd_changed = match (&data.cwd, &self.working_directory) {
+            (Some(new_cwd), Some(old_cwd)) => new_cwd != old_cwd,
+            (Some(_), None) => true,
+            _ => false,
+        };
+        if cwd_changed {
+            self.working_directory = data.cwd.clone();
+        }
+        cwd_changed
     }
 
     /// Updates status based on a hook event.
@@ -1514,5 +1527,111 @@ mod tests {
         assert_eq!(view.child_session_ids.len(), 2);
         assert_eq!(view.child_session_ids[0].as_str(), "child-1");
         assert_eq!(view.child_session_ids[1].as_str(), "child-2");
+    }
+
+    // ========================================================================
+    // update_from_status_line cwd change detection
+    // ========================================================================
+
+    fn make_status_data(cwd: Option<&str>) -> StatusLineData {
+        StatusLineData {
+            session_id: "test".to_string(),
+            model_id: "claude-sonnet-4-20250514".to_string(),
+            model_display_name: None,
+            cost_usd: 0.10,
+            total_duration_ms: 1000,
+            api_duration_ms: 500,
+            lines_added: 10,
+            lines_removed: 5,
+            total_input_tokens: 1000,
+            total_output_tokens: 500,
+            context_window_size: 200_000,
+            current_input_tokens: 800,
+            current_output_tokens: 400,
+            cache_creation_tokens: 0,
+            cache_read_tokens: 0,
+            cwd: cwd.map(|s| s.to_string()),
+            version: None,
+        }
+    }
+
+    #[test]
+    fn test_update_from_status_line_cwd_changed() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test"),
+            AgentType::GeneralPurpose,
+            Model::Sonnet4,
+        );
+        session.working_directory = Some("/home/user/repo-a".to_string());
+
+        let data = make_status_data(Some("/home/user/repo-b"));
+        let changed = session.update_from_status_line(&data);
+
+        assert!(changed, "should return true when cwd changes");
+        assert_eq!(
+            session.working_directory.as_deref(),
+            Some("/home/user/repo-b"),
+            "working_directory should be updated"
+        );
+    }
+
+    #[test]
+    fn test_update_from_status_line_cwd_same() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test"),
+            AgentType::GeneralPurpose,
+            Model::Sonnet4,
+        );
+        session.working_directory = Some("/home/user/repo".to_string());
+
+        let data = make_status_data(Some("/home/user/repo"));
+        let changed = session.update_from_status_line(&data);
+
+        assert!(!changed, "should return false when cwd is the same");
+    }
+
+    #[test]
+    fn test_update_from_status_line_cwd_none_to_some() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test"),
+            AgentType::GeneralPurpose,
+            Model::Sonnet4,
+        );
+        // working_directory starts as None
+
+        let data = make_status_data(Some("/home/user/repo"));
+        let changed = session.update_from_status_line(&data);
+
+        assert!(
+            changed,
+            "should return true when cwd goes from None to Some"
+        );
+        assert_eq!(
+            session.working_directory.as_deref(),
+            Some("/home/user/repo")
+        );
+    }
+
+    #[test]
+    fn test_update_from_status_line_cwd_some_to_none() {
+        let mut session = SessionDomain::new(
+            SessionId::new("test"),
+            AgentType::GeneralPurpose,
+            Model::Sonnet4,
+        );
+        session.working_directory = Some("/home/user/repo".to_string());
+
+        let data = make_status_data(None);
+        let changed = session.update_from_status_line(&data);
+
+        assert!(
+            !changed,
+            "should return false when incoming cwd is None (partial update)"
+        );
+        assert_eq!(
+            session.working_directory.as_deref(),
+            Some("/home/user/repo"),
+            "should preserve existing cwd when incoming is None"
+        );
     }
 }
