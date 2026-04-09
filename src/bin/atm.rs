@@ -504,19 +504,17 @@ async fn run_event_loop(
                                         let target = panes
                                             .iter()
                                             .filter(|p| {
-                                                current_session.map_or(true, |s| p.session_name == s)
-                                                && atm_pane.as_deref() != Some(p.pane_id.as_str())
+                                                current_session
+                                                    .is_none_or(|s| p.session_name == s)
+                                                    && atm_pane.as_deref()
+                                                        != Some(p.pane_id.as_str())
                                             })
                                             .max_by_key(|p| (p.width as u32) * (p.height as u32))
                                             .map(|p| p.pane_id.as_str())
                                             .or(atm_pane.as_deref())
                                             .unwrap_or("%0");
                                         // Query the target pane's cwd for the new agent
-                                        let cwd = client
-                                            .get_pane_cwd(target)
-                                            .await
-                                            .ok()
-                                            .flatten();
+                                        let cwd = client.get_pane_cwd(target).await.ok().flatten();
                                         let mut cmd = "claude".to_string();
                                         if let Some(ref dir) = cwd {
                                             let escaped = dir.replace('\'', "'\\''");
@@ -529,9 +527,13 @@ async fn run_event_loop(
                                             .await
                                         {
                                             Ok(pane_id) => {
-                                                if let Err(e) = client.send_keys(&pane_id, &cmd).await {
+                                                if let Err(e) =
+                                                    client.send_keys(&pane_id, &cmd).await
+                                                {
                                                     warn!(error = %e, "Failed to send command to pane");
-                                                } else if let Err(e) = client.send_keys(&pane_id, "Enter").await {
+                                                } else if let Err(e) =
+                                                    client.send_keys(&pane_id, "Enter").await
+                                                {
                                                     warn!(error = %e, "Failed to send Enter to pane");
                                                 }
                                                 info!(pane_id = %pane_id, ?direction, "Spawned new agent")
@@ -1210,82 +1212,6 @@ fn is_separator_line(trimmed: &str) -> bool {
             .all(|c| matches!(c, '─' | '━' | '═' | '┄' | '┈' | ' '))
 }
 
-#[cfg(test)]
-mod prompt_tests {
-    use super::extract_prompt;
-
-    #[test]
-    fn test_extract_numbered_prompt() {
-        let lines: Vec<String> = vec![
-            "Some previous output",
-            "",
-            "Do you like pineapple on pizza?",
-            "",
-            "❯ 1. Yes",
-            "    Pineapple belongs on pizza",
-            "  2. No",
-            "    Pineapple does not belong on pizza",
-            "  3. Type something.",
-            "",
-            "  4. Chat about this",
-            "",
-            "Enter to select · ↑/↓ to navigate · Esc to cancel",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-        let prompt = extract_prompt(&lines);
-        let text = prompt
-            .iter()
-            .map(|l| l.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            text.contains("pineapple on pizza"),
-            "should contain the question"
-        );
-        assert!(text.contains("1. Yes"), "should contain option 1");
-        assert!(text.contains("4. Chat"), "should contain option 4");
-        assert!(text.contains("Enter to select"), "should contain footer");
-        assert!(
-            !text.contains("previous output"),
-            "should not contain earlier output"
-        );
-    }
-
-    #[test]
-    fn test_extract_yn_prompt() {
-        let lines: Vec<String> = vec![
-            "lots of code output here",
-            "more code",
-            "",
-            "Allow Bash: git status? (Y)es/(N)o",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-        let prompt = extract_prompt(&lines);
-        assert!(prompt.iter().any(|l| l.contains("(Y)es")));
-    }
-
-    #[test]
-    fn test_fallback_when_no_prompt() {
-        let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
-
-        let prompt = extract_prompt(&lines);
-        assert_eq!(prompt.len(), 15);
-    }
-
-    #[test]
-    fn test_empty_input() {
-        let lines: Vec<String> = vec![];
-        let prompt = extract_prompt(&lines);
-        assert!(prompt.is_empty());
-    }
-}
-
 async fn cmd_status() -> Result<()> {
     daemon::ensure_daemon_running().map_err(|e| anyhow::anyhow!("Failed to start daemon: {e}"))?;
     let sessions = fetch_sessions().await?;
@@ -1400,7 +1326,13 @@ fn install_resize_hooks(socket: &Option<String>, session_name: &str) -> Result<(
     let hook_cmd = format!("run-shell '{}'", script_path.display());
     tmux_run(
         socket,
-        &["set-hook", "-t", session_name, "after-resize-window", &hook_cmd],
+        &[
+            "set-hook",
+            "-t",
+            session_name,
+            "after-resize-window",
+            &hook_cmd,
+        ],
     )?;
     // NOTE: bind-key is global; the last workspace created wins for prefix-R.
     tmux_run(socket, &["bind-key", "-T", "prefix", "R", &hook_cmd])?;
@@ -1418,14 +1350,27 @@ fn inject_sidebar(
     let atm_pane = tmux_run(
         socket,
         &[
-            "split-window", "-hb", "-t", target_pane, "-l", &width,
-            "-P", "-F", "#{pane_id}",
+            "split-window",
+            "-hb",
+            "-t",
+            target_pane,
+            "-l",
+            &width,
+            "-P",
+            "-F",
+            "#{pane_id}",
         ],
     )?;
     // Tag with both a pane title (for resize script) and a user option (for reliable detection).
     // Pane titles can be overwritten by the shell if ATM crashes; @atm-sidebar persists.
-    tmux_run(socket, &["select-pane", "-t", &atm_pane, "-T", "atm-sidebar"])?;
-    tmux_run(socket, &["set-option", "-p", "-t", &atm_pane, "@atm-sidebar", "1"])?;
+    tmux_run(
+        socket,
+        &["select-pane", "-t", &atm_pane, "-T", "atm-sidebar"],
+    )?;
+    tmux_run(
+        socket,
+        &["set-option", "-p", "-t", &atm_pane, "@atm-sidebar", "1"],
+    )?;
     let atm_cmd = format!("atm --compact --tmux-session '{session_name}'");
     tmux_run(socket, &["send-keys", "-t", &atm_pane, &atm_cmd, "Enter"])?;
     Ok(atm_pane)
@@ -1471,7 +1416,13 @@ fn install_new_window_hook(socket: &Option<String>, session_name: &str) -> Resul
     let hook_cmd = format!("run-shell '{}'", script_path.display());
     tmux_run(
         socket,
-        &["set-hook", "-t", session_name, "after-new-window", &hook_cmd],
+        &[
+            "set-hook",
+            "-t",
+            session_name,
+            "after-new-window",
+            &hook_cmd,
+        ],
     )?;
     Ok(())
 }
@@ -1493,9 +1444,7 @@ fn exec_attach(socket: &Option<String>, session_name: &str) -> Result<()> {
 
     #[cfg(not(unix))]
     {
-        let status = cmd
-            .status()
-            .context("Failed to attach to tmux session")?;
+        let status = cmd.status().context("Failed to attach to tmux session")?;
         if !status.success() {
             bail!("tmux attach failed with status {status}");
         }
@@ -1508,7 +1457,6 @@ fn exec_attach(socket: &Option<String>, session_name: &str) -> Result<()> {
 // ============================================================================
 
 fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()> {
-
     // 1. Determine session name, sanitized to safe characters
     let session_name = name.unwrap_or_else(default_session_name);
     validate_session_name(&session_name)?;
@@ -1527,13 +1475,16 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
             bail!(
                 "Workspace '{}' already exists on socket 'atm-{}'. \
                  Attach with: atm workspace attach {} --isolate",
-                session_name, session_name, session_name
+                session_name,
+                session_name,
+                session_name
             );
         } else {
             bail!(
                 "Workspace '{}' already exists. \
                  Attach with: atm workspace attach {}",
-                session_name, session_name
+                session_name,
+                session_name
             );
         }
     }
@@ -1546,9 +1497,17 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
     let agent_pane = tmux_run(
         &socket_name,
         &[
-            "new-session", "-d", "-s", &session_name,
-            "-x", &cols_str, "-y", &rows_str,
-            "-P", "-F", "#{pane_id}",
+            "new-session",
+            "-d",
+            "-s",
+            &session_name,
+            "-x",
+            &cols_str,
+            "-y",
+            &rows_str,
+            "-P",
+            "-F",
+            "#{pane_id}",
         ],
     )?;
 
@@ -1558,19 +1517,42 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
     // 6. Split: shell below the agent pane (20% height)
     tmux_run(
         &socket_name,
-        &["split-window", "-v", "-t", &agent_pane, "-l", "20%", "-P", "-F", "#{pane_id}"],
+        &[
+            "split-window",
+            "-v",
+            "-t",
+            &agent_pane,
+            "-l",
+            "20%",
+            "-P",
+            "-F",
+            "#{pane_id}",
+        ],
     )?;
 
     // 7. If --editor: split agent pane horizontally, editor on the left
     if editor {
         tmux_run(
             &socket_name,
-            &["split-window", "-hb", "-t", &agent_pane, "-l", "50%", "-P", "-F", "#{pane_id}"],
+            &[
+                "split-window",
+                "-hb",
+                "-t",
+                &agent_pane,
+                "-l",
+                "50%",
+                "-P",
+                "-F",
+                "#{pane_id}",
+            ],
         )?;
     }
 
     // 8. Launch claude in agent pane
-    tmux_run(&socket_name, &["send-keys", "-t", &agent_pane, "claude", "Enter"])?;
+    tmux_run(
+        &socket_name,
+        &["send-keys", "-t", &agent_pane, "claude", "Enter"],
+    )?;
 
     // 9. Install resize hooks + prefix-R keybinding
     install_resize_hooks(&socket_name, &session_name)?;
@@ -1607,7 +1589,11 @@ fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
         };
         let output = tmux_run(
             &socket,
-            &["list-sessions", "-F", "#{session_last_attached} #{session_name}"],
+            &[
+                "list-sessions",
+                "-F",
+                "#{session_last_attached} #{session_name}",
+            ],
         )?;
         let mut sessions: Vec<_> = output
             .lines()
@@ -1640,25 +1626,28 @@ fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
     let windows_output = tmux_run(
         &socket_name,
         &[
-            "list-windows", "-t", &session_name,
-            "-F", "#{window_id} #{window_width}",
+            "list-windows",
+            "-t",
+            &session_name,
+            "-F",
+            "#{window_id} #{window_width}",
         ],
     )?;
 
     for line in windows_output.lines() {
         let mut parts = line.splitn(2, ' ');
         let window_id = parts.next().unwrap_or_default();
-        let cols: u16 = parts
-            .next()
-            .and_then(|w| w.parse().ok())
-            .unwrap_or(80);
+        let cols: u16 = parts.next().and_then(|w| w.parse().ok()).unwrap_or(80);
         // Check if this window already has an atm-sidebar pane (using @atm-sidebar option,
         // which survives ATM crashes unlike pane titles that the shell can overwrite)
         let panes_output = tmux_run(
             &socket_name,
             &[
-                "list-panes", "-t", window_id,
-                "-F", "#{pane_id}:#{@atm-sidebar}",
+                "list-panes",
+                "-t",
+                window_id,
+                "-F",
+                "#{pane_id}:#{@atm-sidebar}",
             ],
         )?;
 
@@ -1674,11 +1663,12 @@ fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
             .and_then(|line| line.split(':').next())
             .ok_or_else(|| anyhow::anyhow!("Window {} has no panes", window_id))?;
 
-        inject_sidebar(&socket_name, first_pane, &session_name, cols)
-            .with_context(|| format!(
+        inject_sidebar(&socket_name, first_pane, &session_name, cols).with_context(|| {
+            format!(
                 "Failed to inject sidebar into window {window_id}; \
                  re-run `atm workspace attach` to complete injection"
-            ))?;
+            )
+        })?;
     }
 
     // 5. Install hooks for resize and new windows
@@ -1930,4 +1920,80 @@ async fn main() -> Result<()> {
     info!("ATM TUI stopped");
 
     result
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::extract_prompt;
+
+    #[test]
+    fn test_extract_numbered_prompt() {
+        let lines: Vec<String> = vec![
+            "Some previous output",
+            "",
+            "Do you like pineapple on pizza?",
+            "",
+            "❯ 1. Yes",
+            "    Pineapple belongs on pizza",
+            "  2. No",
+            "    Pineapple does not belong on pizza",
+            "  3. Type something.",
+            "",
+            "  4. Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let prompt = extract_prompt(&lines);
+        let text = prompt
+            .iter()
+            .map(|l| l.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            text.contains("pineapple on pizza"),
+            "should contain the question"
+        );
+        assert!(text.contains("1. Yes"), "should contain option 1");
+        assert!(text.contains("4. Chat"), "should contain option 4");
+        assert!(text.contains("Enter to select"), "should contain footer");
+        assert!(
+            !text.contains("previous output"),
+            "should not contain earlier output"
+        );
+    }
+
+    #[test]
+    fn test_extract_yn_prompt() {
+        let lines: Vec<String> = vec![
+            "lots of code output here",
+            "more code",
+            "",
+            "Allow Bash: git status? (Y)es/(N)o",
+        ]
+        .into_iter()
+        .map(String::from)
+        .collect();
+
+        let prompt = extract_prompt(&lines);
+        assert!(prompt.iter().any(|l| l.contains("(Y)es")));
+    }
+
+    #[test]
+    fn test_fallback_when_no_prompt() {
+        let lines: Vec<String> = (0..20).map(|i| format!("line {i}")).collect();
+
+        let prompt = extract_prompt(&lines);
+        assert_eq!(prompt.len(), 15);
+    }
+
+    #[test]
+    fn test_empty_input() {
+        let lines: Vec<String> = vec![];
+        let prompt = extract_prompt(&lines);
+        assert!(prompt.is_empty());
+    }
 }

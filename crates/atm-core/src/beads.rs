@@ -34,25 +34,44 @@ pub fn find_in_progress_tasks(working_dir: &str) -> Vec<BeadsTask> {
             continue;
         }
         if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-            let status = val.get("status").and_then(|v| v.as_str()).unwrap_or_default();
+            let status = val
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             if status != "in_progress" {
                 continue;
             }
-            let id = val.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-            let title = val.get("title").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+            let id = val
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let title = val
+                .get("title")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+                .to_string();
             let updated_at = val
                 .get("updated_at")
                 .and_then(|v| v.as_str())
                 .unwrap_or_default()
                 .to_string();
 
-            let description = val.get("description")
+            let description = val
+                .get("description")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_string());
 
             if !id.is_empty() && !title.is_empty() {
-                tasks.push((updated_at, BeadsTask { id, title, description }));
+                tasks.push((
+                    updated_at,
+                    BeadsTask {
+                        id,
+                        title,
+                        description,
+                    },
+                ));
             }
         }
     }

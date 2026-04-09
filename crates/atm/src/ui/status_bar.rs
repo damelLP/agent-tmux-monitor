@@ -166,8 +166,7 @@ pub fn render_compact_footer(frame: &mut Frame, area: Rect, app: &App) {
     } else {
         "? help"
     };
-    let paragraph = Paragraph::new(text)
-        .style(Style::default().fg(Color::DarkGray));
+    let paragraph = Paragraph::new(text).style(Style::default().fg(Color::DarkGray));
     frame.render_widget(paragraph, area);
 }
 

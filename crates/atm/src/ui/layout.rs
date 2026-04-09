@@ -90,7 +90,7 @@ impl CompactLayout {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(3), // Header
-                Constraint::Min(6),   // Content (minimum 6 lines)
+                Constraint::Min(6),    // Content (minimum 6 lines)
                 Constraint::Length(1), // Footer (compact: just "? help")
             ])
             .areas(area);

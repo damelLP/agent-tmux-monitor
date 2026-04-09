@@ -249,7 +249,9 @@ pub fn render_compact_preview(
             let mut result: Vec<Line<'_>> = Vec::new();
 
             // Beads task: try project_root first (where .beads/ lives), then worktree_path
-            let beads_task = s.project_root.as_deref()
+            let beads_task = s
+                .project_root
+                .as_deref()
                 .or(s.worktree_path.as_deref())
                 .and_then(|dir| {
                     let tasks = atm_core::beads::find_in_progress_tasks(dir);
@@ -259,7 +261,9 @@ pub fn render_compact_preview(
             if let Some(ref task) = beads_task {
                 result.push(Line::from(Span::styled(
                     task.title.clone(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 if let Some(ref desc) = task.description {
                     for line in desc.lines() {
@@ -285,9 +289,10 @@ pub fn render_compact_preview(
 
             result
         }
-        None => vec![
-            Line::from(Span::styled("No session selected", Style::default().fg(Color::DarkGray))),
-        ],
+        None => vec![Line::from(Span::styled(
+            "No session selected",
+            Style::default().fg(Color::DarkGray),
+        ))],
     };
 
     let paragraph = Paragraph::new(lines)

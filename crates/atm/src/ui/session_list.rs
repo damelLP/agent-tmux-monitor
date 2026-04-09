@@ -84,20 +84,18 @@ pub fn render_compact_session_list(frame: &mut Frame, area: Rect, app: &App) {
                     });
                     create_group_line(&indent, label, row, is_selected)
                 }
-                TreeRowKind::Team { name } => {
-                    create_group_line(&indent, name, row, is_selected)
-                }
-                TreeRowKind::Agent { session } => {
-                    create_compact_agent_line(
-                        &indent, session, is_selected, app.blink_visible, inner_width,
-                    )
-                }
+                TreeRowKind::Team { name } => create_group_line(&indent, name, row, is_selected),
+                TreeRowKind::Agent { session } => create_compact_agent_line(
+                    &indent,
+                    session,
+                    is_selected,
+                    app.blink_visible,
+                    inner_width,
+                ),
             };
 
             let bg_style = match &row.kind {
-                TreeRowKind::Agent { session } => {
-                    get_row_background_style(session, is_selected)
-                }
+                TreeRowKind::Agent { session } => get_row_background_style(session, is_selected),
                 _ if is_selected => Style::default().bg(Color::Rgb(30, 30, 40)),
                 _ => Style::default(),
             };
@@ -262,7 +260,9 @@ fn create_compact_agent_line(
     let icon_color = status_color(session.status);
     let ctx_color = context_color(session.context_percentage, session.context_critical);
 
-    let name = session.worktree_branch.as_deref()
+    let name = session
+        .worktree_branch
+        .as_deref()
         .unwrap_or(&session.id_short);
 
     let overhead = 9u16.saturating_add(indent.len() as u16);
@@ -272,7 +272,9 @@ fn create_compact_agent_line(
     let spans = vec![
         Span::styled(
             if is_selected { ">" } else { " " },
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw(indent.to_string()),
         Span::styled(
