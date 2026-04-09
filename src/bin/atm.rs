@@ -841,7 +841,6 @@ async fn cmd_spawn(
         .await
         .context("Failed to send Enter to new pane")?;
 
-    println!("{new_pane}");
     Ok(())
 }
 
