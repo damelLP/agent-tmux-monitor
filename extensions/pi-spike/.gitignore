@@ -1,0 +1,4 @@
+# Spike outputs (defensive — also written to /tmp/ by default).
+*.jsonl
+*-summary.txt
+node_modules/
