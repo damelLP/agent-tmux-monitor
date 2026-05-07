@@ -605,6 +605,225 @@ async fn test_multiple_clients_concurrent() {
     server.shutdown().await;
 }
 
+// ============================================================================
+// Hook Event → LifecycleEvent translation (end-to-end)
+//
+// These tests drive a real Claude raw `HookEvent` JSON over the wire and
+// confirm that the connection layer translates it into a vendor-neutral
+// `LifecycleEvent`, the registry applies it correctly, and the resulting
+// session state matches expectations. Together they exercise:
+//
+//   wire JSON  →  RawHookEvent  →  LifecycleEvent  →  Session state
+//
+// Each test pre-registers a session (to skip the PID-based create-on-event
+// path that needs `/proc` lookups), then sends a hook event and reads the
+// session view back through the registry handle.
+// ============================================================================
+
+/// Builds a raw Claude hook-event JSON payload for the given session.
+fn hook_event_json(
+    session_id: &str,
+    event_name: &str,
+    extras: serde_json::Value,
+) -> serde_json::Value {
+    let mut obj = serde_json::json!({
+        "session_id": session_id,
+        "hook_event_name": event_name,
+    });
+    if let (Some(map), Some(extras)) = (obj.as_object_mut(), extras.as_object()) {
+        for (k, v) in extras {
+            map.insert(k.clone(), v.clone());
+        }
+    }
+    obj
+}
+
+#[tokio::test]
+async fn test_e2e_pre_tool_use_translates_to_tool_call_start() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-tool");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // Send a real Claude PreToolUse(Bash) hook event over the wire.
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash"}),
+        )))
+        .await;
+
+    // Give the actor a tick to apply the event.
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should still exist");
+    assert_eq!(
+        view.status_label, "working",
+        "PreToolUse(Bash) should translate to ToolCallStart -> Working"
+    );
+    assert_eq!(view.activity_detail, Some("Bash".into()));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pre_tool_use_interactive_translates_to_needs_input() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-interactive");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // PreToolUse(AskUserQuestion) is the load-bearing case: the translator
+    // must collapse this into NeedsInput rather than ToolCallStart, because
+    // AskUserQuestion semantically blocks waiting on the user.
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "PreToolUse",
+            serde_json::json!({"tool_name": "AskUserQuestion"}),
+        )))
+        .await;
+
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should still exist");
+    assert_eq!(
+        view.status_label, "needs input",
+        "interactive tool should translate to NeedsInput -> AttentionNeeded"
+    );
+    assert_eq!(view.activity_detail, Some("AskUserQuestion".into()));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_stop_translates_to_idle() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-stop");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // Drive Working -> Idle via the wire. Stop translates to WorkingEnd
+    // which transitions the session to Idle.
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "PreToolUse",
+            serde_json::json!({"tool_name": "Bash"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "Stop",
+            serde_json::json!({}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should still exist after Stop");
+    assert_eq!(
+        view.status_label, "idle",
+        "Stop should translate to WorkingEnd -> Idle"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_session_end_removes_session() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-end");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    assert!(registry.get_session(session_id.clone()).await.is_some());
+
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "SessionEnd",
+            serde_json::json!({"reason": "clear"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        registry.get_session(session_id.clone()).await.is_none(),
+        "SessionEnd lifecycle event should remove the session"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_notification_permission_prompt_becomes_needs_input() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-permission");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // Claude Notification(permission_prompt) is one of the cases the
+    // translation layer collapses to NeedsInput - the same conceptual
+    // signal pi's extension synthesizes from `tool_call`.
+    client
+        .send(ClientMessage::hook_event(hook_event_json(
+            session_id.as_str(),
+            "Notification",
+            serde_json::json!({"notification_type": "permission_prompt"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should still exist");
+    assert_eq!(
+        view.status_label, "needs input",
+        "Notification(permission_prompt) should translate to NeedsInput"
+    );
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_concurrent_ping_pong() {
     let server = TestServer::spawn().await;

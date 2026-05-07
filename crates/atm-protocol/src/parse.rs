@@ -2,7 +2,10 @@
 //!
 //! Based on validated integration testing (Week 1).
 
-use atm_core::{HookEventType, SessionDomain, SessionId, StatusLineData};
+use atm_core::{
+    is_interactive_tool, ClaudeEventType, LifecycleEvent, NeedsInputReason, SessionDomain,
+    SessionId, StatusLineData,
+};
 use serde::Deserialize;
 
 /// Raw status line JSON structure from Claude Code.
@@ -257,13 +260,82 @@ pub struct RawHookEvent {
 
 impl RawHookEvent {
     /// Parses the hook event type.
-    pub fn event_type(&self) -> Option<HookEventType> {
-        HookEventType::from_event_name(&self.hook_event_name)
+    pub fn event_type(&self) -> Option<ClaudeEventType> {
+        ClaudeEventType::from_event_name(&self.hook_event_name)
     }
 
     /// Returns the session ID.
     pub fn session_id(&self) -> SessionId {
         SessionId::new(&self.session_id)
+    }
+
+    /// Translates this Claude raw event into a vendor-neutral
+    /// `LifecycleEvent`.
+    ///
+    /// Returns `None` if `hook_event_name` does not match a known
+    /// Claude event. The translation collapses Claude-specific
+    /// distinctions where the underlying concept is vendor-neutral
+    /// (e.g. `PostToolUse`/`PostToolUseFailure` both become
+    /// `ToolCallEnd`, distinguished by `is_error`).
+    pub fn to_lifecycle_event(&self) -> Option<LifecycleEvent> {
+        let ev = self.event_type()?;
+        let tool_name = self.tool_name.clone().unwrap_or_default();
+        Some(match ev {
+            ClaudeEventType::PreToolUse => {
+                if is_interactive_tool(&tool_name) {
+                    LifecycleEvent::NeedsInput {
+                        reason: NeedsInputReason::InteractiveTool { tool_name },
+                    }
+                } else {
+                    LifecycleEvent::ToolCallStart { name: tool_name }
+                }
+            }
+            ClaudeEventType::PostToolUse => LifecycleEvent::ToolCallEnd {
+                name: tool_name,
+                is_error: false,
+            },
+            ClaudeEventType::PostToolUseFailure => LifecycleEvent::ToolCallEnd {
+                name: tool_name,
+                is_error: true,
+            },
+            ClaudeEventType::UserPromptSubmit => LifecycleEvent::PromptSubmit {
+                prompt: self.prompt.clone(),
+            },
+            ClaudeEventType::Stop => LifecycleEvent::WorkingEnd,
+            ClaudeEventType::SubagentStart => LifecycleEvent::ChildSessionStart {
+                id: self.agent_id.clone(),
+                role: self.agent_type.clone(),
+            },
+            ClaudeEventType::SubagentStop => LifecycleEvent::ChildSessionEnd {
+                id: self.agent_id.clone(),
+            },
+            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart,
+            ClaudeEventType::SessionEnd => LifecycleEvent::SessionEnd {
+                reason: self.reason.clone(),
+            },
+            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart,
+            ClaudeEventType::Setup => LifecycleEvent::Notification {
+                message: None,
+                kind: Some("setup".into()),
+            },
+            ClaudeEventType::Notification => match self.notification_type.as_deref() {
+                Some("permission_prompt") | Some("elicitation_dialog") => {
+                    LifecycleEvent::NeedsInput {
+                        reason: NeedsInputReason::Notification {
+                            kind: self
+                                .notification_type
+                                .clone()
+                                .unwrap_or_else(|| "permission_prompt".into()),
+                        },
+                    }
+                }
+                Some("idle_prompt") => LifecycleEvent::Idle,
+                _ => LifecycleEvent::Notification {
+                    message: self.message.clone(),
+                    kind: self.notification_type.clone(),
+                },
+            },
+        })
     }
 }
 
@@ -299,7 +371,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::PreToolUse));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::PreToolUse));
         assert_eq!(event.tool_name.as_deref(), Some("Bash"));
     }
 
@@ -397,7 +469,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::Stop));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::Stop));
         assert_eq!(event.stop_hook_active, Some(true));
     }
 
@@ -410,7 +482,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::UserPromptSubmit));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::UserPromptSubmit));
         assert_eq!(event.prompt.as_deref(), Some("Help me write a function"));
     }
 
@@ -424,7 +496,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::SubagentStart));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::SubagentStart));
         assert_eq!(event.agent_id.as_deref(), Some("agent_456"));
         assert_eq!(event.agent_type.as_deref(), Some("Explore"));
     }
@@ -439,7 +511,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::Notification));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::Notification));
         assert_eq!(
             event.notification_type.as_deref(),
             Some("permission_prompt")
@@ -456,7 +528,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::SessionStart));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::SessionStart));
         assert_eq!(event.source.as_deref(), Some("resume"));
     }
 
@@ -469,7 +541,7 @@ mod tests {
         }"#;
 
         let event: RawHookEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(event.event_type(), Some(HookEventType::PreCompact));
+        assert_eq!(event.event_type(), Some(ClaudeEventType::PreCompact));
         assert_eq!(event.trigger.as_deref(), Some("auto"));
     }
 
@@ -594,5 +666,212 @@ mod tests {
         assert_eq!(session.id.as_str(), "test-partial");
         assert!((session.cost.as_usd() - 0.0).abs() < 0.001);
         assert_eq!(session.context.total_input_tokens.as_u64(), 0);
+    }
+
+    // ========================================================================
+    // LifecycleEvent translation tests
+    //
+    // Each Claude raw hook event has exactly one canonical translation;
+    // these lock the mapping table down so future adapter authors can
+    // see the contract.
+    // ========================================================================
+
+    fn raw(name: &str) -> RawHookEvent {
+        RawHookEvent {
+            session_id: "s".into(),
+            hook_event_name: name.into(),
+            cwd: None,
+            permission_mode: None,
+            pid: None,
+            tmux_pane: None,
+            tool_name: None,
+            tool_input: None,
+            tool_response: None,
+            tool_use_id: None,
+            prompt: None,
+            stop_hook_active: None,
+            agent_id: None,
+            agent_type: None,
+            agent_transcript_path: None,
+            source: None,
+            reason: None,
+            model: None,
+            trigger: None,
+            custom_instructions: None,
+            notification_type: None,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_pre_tool_use_non_interactive() {
+        let mut e = raw("PreToolUse");
+        e.tool_name = Some("Bash".into());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::ToolCallStart {
+                name: "Bash".into()
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_pre_tool_use_interactive_becomes_needs_input() {
+        for tool in ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"] {
+            let mut e = raw("PreToolUse");
+            e.tool_name = Some(tool.into());
+            assert_eq!(
+                e.to_lifecycle_event(),
+                Some(LifecycleEvent::NeedsInput {
+                    reason: NeedsInputReason::InteractiveTool {
+                        tool_name: tool.into()
+                    }
+                }),
+                "tool {tool} should map to NeedsInput"
+            );
+        }
+    }
+
+    #[test]
+    fn lifecycle_post_tool_use_distinguishes_failure() {
+        let mut ok = raw("PostToolUse");
+        ok.tool_name = Some("Bash".into());
+        let mut fail = raw("PostToolUseFailure");
+        fail.tool_name = Some("Bash".into());
+
+        assert_eq!(
+            ok.to_lifecycle_event(),
+            Some(LifecycleEvent::ToolCallEnd {
+                name: "Bash".into(),
+                is_error: false,
+            })
+        );
+        assert_eq!(
+            fail.to_lifecycle_event(),
+            Some(LifecycleEvent::ToolCallEnd {
+                name: "Bash".into(),
+                is_error: true,
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_user_prompt_carries_prompt() {
+        let mut e = raw("UserPromptSubmit");
+        e.prompt = Some("hello".into());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::PromptSubmit {
+                prompt: Some("hello".into())
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_stop_to_working_end() {
+        assert_eq!(
+            raw("Stop").to_lifecycle_event(),
+            Some(LifecycleEvent::WorkingEnd)
+        );
+    }
+
+    #[test]
+    fn lifecycle_subagent_to_child_session() {
+        let mut start = raw("SubagentStart");
+        start.agent_id = Some("a-1".into());
+        start.agent_type = Some("explore".into());
+        assert_eq!(
+            start.to_lifecycle_event(),
+            Some(LifecycleEvent::ChildSessionStart {
+                id: Some("a-1".into()),
+                role: Some("explore".into()),
+            })
+        );
+
+        let mut stop = raw("SubagentStop");
+        stop.agent_id = Some("a-1".into());
+        assert_eq!(
+            stop.to_lifecycle_event(),
+            Some(LifecycleEvent::ChildSessionEnd {
+                id: Some("a-1".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_session_lifecycle() {
+        assert_eq!(
+            raw("SessionStart").to_lifecycle_event(),
+            Some(LifecycleEvent::SessionStart)
+        );
+
+        let mut end = raw("SessionEnd");
+        end.reason = Some("clear".into());
+        assert_eq!(
+            end.to_lifecycle_event(),
+            Some(LifecycleEvent::SessionEnd {
+                reason: Some("clear".into())
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_pre_compact_to_context_compact_start() {
+        assert_eq!(
+            raw("PreCompact").to_lifecycle_event(),
+            Some(LifecycleEvent::ContextCompactStart)
+        );
+    }
+
+    #[test]
+    fn lifecycle_setup_to_setup_notification() {
+        assert_eq!(
+            raw("Setup").to_lifecycle_event(),
+            Some(LifecycleEvent::Notification {
+                message: None,
+                kind: Some("setup".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_notification_permission_to_needs_input() {
+        let mut e = raw("Notification");
+        e.notification_type = Some("permission_prompt".into());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::NeedsInput {
+                reason: NeedsInputReason::Notification {
+                    kind: "permission_prompt".into()
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_notification_idle_to_idle() {
+        let mut e = raw("Notification");
+        e.notification_type = Some("idle_prompt".into());
+        assert_eq!(e.to_lifecycle_event(), Some(LifecycleEvent::Idle));
+    }
+
+    #[test]
+    fn lifecycle_notification_generic_passthrough() {
+        let mut e = raw("Notification");
+        e.notification_type = Some("info".into());
+        e.message = Some("hi".into());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::Notification {
+                message: Some("hi".into()),
+                kind: Some("info".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn lifecycle_unknown_event_returns_none() {
+        let e = raw("NotARealEvent");
+        assert_eq!(e.to_lifecycle_event(), None);
     }
 }

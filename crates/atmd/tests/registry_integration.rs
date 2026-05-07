@@ -6,7 +6,7 @@
 //! Per CLAUDE.md: Tests CAN use `.unwrap()` and `.expect()` - this is allowed.
 //! We test the panic-free behavior of production code through assertions.
 
-use atm_core::{AgentType, HookEventType, Model, SessionDomain, SessionId};
+use atm_core::{AgentType, LifecycleEvent, Model, SessionDomain, SessionId};
 use atmd::registry::{spawn_registry, RegistryError, RemovalReason, SessionEvent, MAX_SESSIONS};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -247,18 +247,15 @@ async fn test_event_subscription_hook_event_update() {
     // Drain registered event
     let _ = timeout(Duration::from_millis(100), rx.recv()).await;
 
-    // Apply hook event
+    // Apply lifecycle event
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("hook-event-test"),
-            HookEventType::PreToolUse,
-            Some("Bash".to_string()),
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::ToolCallStart {
+                name: "Bash".into(),
+            },
+            None,
+            None,
         )
         .await
         .unwrap();
@@ -519,19 +516,16 @@ async fn test_hook_event_pre_tool_use() {
 
     // Apply PreToolUse
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("hook-pre"),
-            HookEventType::PreToolUse,
-            Some("Write".to_string()),
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::ToolCallStart {
+                name: "Write".into(),
+            },
+            None,
+            None,
         )
         .await
-        .expect("should apply hook event");
+        .expect("should apply lifecycle event");
 
     // Verify status changed to working
     let view = handle
@@ -552,35 +546,30 @@ async fn test_hook_event_post_tool_use() {
 
     // Apply PreToolUse first
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("hook-post"),
-            HookEventType::PreToolUse,
-            Some("Bash".to_string()),
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::ToolCallStart {
+                name: "Bash".into(),
+            },
+            None,
+            None,
         )
         .await
         .unwrap();
 
     // Then PostToolUse
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("hook-post"),
-            HookEventType::PostToolUse,
-            Some("Bash".to_string()),
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::ToolCallEnd {
+                name: "Bash".into(),
+                is_error: false,
+            },
+            None,
+            None,
         )
         .await
-        .expect("should apply hook event");
+        .expect("should apply lifecycle event");
 
     // Verify status changed to working (thinking is now Working in 3-state model)
     let view = handle
@@ -594,20 +583,17 @@ async fn test_hook_event_post_tool_use() {
 async fn test_hook_event_nonexistent_session() {
     let handle = spawn_registry();
 
-    // Apply hook event to non-existent session
+    // Apply lifecycle event to non-existent session
     // This should succeed silently - hook events race with status line updates,
     // so we gracefully ignore hooks for sessions that don't exist yet.
     let result = handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("nonexistent"),
-            HookEventType::PreToolUse,
-            Some("Bash".to_string()),
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::ToolCallStart {
+                name: "Bash".into(),
+            },
+            None,
+            None,
         )
         .await;
 
@@ -631,16 +617,11 @@ async fn test_hook_event_session_end() {
 
     // Apply SessionEnd hook
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("session-end-test"),
-            HookEventType::SessionEnd,
-            None, // tool_name
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::SessionEnd { reason: None },
+            None,
+            None,
         )
         .await
         .expect("should apply SessionEnd event");
@@ -678,16 +659,11 @@ async fn test_hook_event_session_end_nonexistent() {
 
     // Apply SessionEnd to non-existent session (race condition scenario)
     let result = handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("nonexistent-for-end"),
-            HookEventType::SessionEnd,
-            None, // tool_name
-            None, // notification_type
-            None, // pid
-            None, // tmux_pane
-            None, // agent_id
-            None, // agent_type
-            None, // prompt
+            LifecycleEvent::SessionEnd { reason: None },
+            None,
+            None,
         )
         .await;
 
@@ -918,16 +894,14 @@ async fn test_hook_event_forwards_agent_fields() {
 
     // Send SubagentStart hook with agent_id and agent_type
     handle
-        .apply_hook_event(
+        .apply_lifecycle_event(
             SessionId::new("parent-for-subagent"),
-            HookEventType::SubagentStart,
+            LifecycleEvent::ChildSessionStart {
+                id: Some("subagent-001".into()),
+                role: Some("explore".into()),
+            },
             None,
             None,
-            None,
-            None,
-            Some("subagent-001".to_string()),
-            Some("explore".to_string()),
-            None, // prompt
         )
         .await
         .expect("SubagentStart hook should succeed");

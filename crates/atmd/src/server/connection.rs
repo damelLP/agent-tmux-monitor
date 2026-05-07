@@ -392,10 +392,13 @@ impl ConnectionHandler {
     }
 
     /// Handles a hook event from Claude Code.
+    ///
+    /// Translates the Claude raw event into a vendor-neutral
+    /// `LifecycleEvent` at this boundary, so the registry below sees
+    /// only the abstract event vocabulary.
     async fn handle_hook_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
         info!(client_id = ?self.client_id, "Received hook event data");
 
-        // Parse the hook event
         let raw_event: RawHookEvent =
             serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
 
@@ -407,27 +410,19 @@ impl ConnectionHandler {
             "Processing hook event"
         );
 
-        // Get event type
-        let event_type = raw_event.event_type().ok_or_else(|| {
+        let lifecycle = raw_event.to_lifecycle_event().ok_or_else(|| {
             ConnectionError::ParseError(format!(
                 "Unknown hook event type: '{}' (session_id={}, tool_name={:?})",
                 raw_event.hook_event_name, raw_event.session_id, raw_event.tool_name
             ))
         })?;
 
-        // Apply to registry (including PID and tmux_pane for process lifecycle tracking)
+        let session_id = raw_event.session_id();
+        let pid = raw_event.pid;
+        let tmux_pane = raw_event.tmux_pane.clone();
+
         self.registry
-            .apply_hook_event(
-                raw_event.session_id(),
-                event_type,
-                raw_event.tool_name,
-                raw_event.notification_type,
-                raw_event.pid,
-                raw_event.tmux_pane,
-                raw_event.agent_id,
-                raw_event.agent_type,
-                raw_event.prompt,
-            )
+            .apply_lifecycle_event(session_id, lifecycle, pid, tmux_pane)
             .await
             .map_err(|e| ConnectionError::RegistryError(e.to_string()))?;
 

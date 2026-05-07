@@ -1,7 +1,8 @@
 //! Session domain entities and value objects.
 
 use crate::hook::is_interactive_tool;
-use crate::{AgentType, ContextUsage, HookEventType, Model, Money, TokenCount};
+use crate::lifecycle::{LifecycleEvent, NeedsInputReason};
+use crate::{AgentType, ClaudeEventType, ContextUsage, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -705,59 +706,132 @@ impl SessionDomain {
         cwd_changed
     }
 
-    /// Updates status based on a hook event.
-    pub fn apply_hook_event(&mut self, event_type: HookEventType, tool_name: Option<&str>) {
+    /// Updates status based on a Claude raw hook event.
+    ///
+    /// Translates the Claude-specific event into a vendor-neutral
+    /// `LifecycleEvent` and dispatches to `apply_lifecycle_event`.
+    /// Prefer calling `apply_lifecycle_event` directly when the caller
+    /// already has a `LifecycleEvent` in hand.
+    pub fn apply_hook_event(&mut self, event_type: ClaudeEventType, tool_name: Option<&str>) {
+        let lifecycle = match event_type {
+            ClaudeEventType::PreToolUse => match tool_name {
+                Some(name) if is_interactive_tool(name) => LifecycleEvent::NeedsInput {
+                    reason: NeedsInputReason::InteractiveTool {
+                        tool_name: name.to_string(),
+                    },
+                },
+                Some(name) => LifecycleEvent::ToolCallStart {
+                    name: name.to_string(),
+                },
+                None => return,
+            },
+            ClaudeEventType::PostToolUse => LifecycleEvent::ToolCallEnd {
+                name: tool_name.unwrap_or("").to_string(),
+                is_error: false,
+            },
+            ClaudeEventType::PostToolUseFailure => LifecycleEvent::ToolCallEnd {
+                name: tool_name.unwrap_or("").to_string(),
+                is_error: true,
+            },
+            ClaudeEventType::UserPromptSubmit => LifecycleEvent::PromptSubmit { prompt: None },
+            ClaudeEventType::Stop => LifecycleEvent::WorkingEnd,
+            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart,
+            ClaudeEventType::SessionEnd => LifecycleEvent::SessionEnd { reason: None },
+            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart,
+            ClaudeEventType::Setup => LifecycleEvent::Notification {
+                message: None,
+                kind: Some("setup".into()),
+            },
+            ClaudeEventType::Notification => LifecycleEvent::Notification {
+                message: None,
+                kind: None,
+            },
+            ClaudeEventType::SubagentStart => LifecycleEvent::ChildSessionStart {
+                id: None,
+                role: None,
+            },
+            ClaudeEventType::SubagentStop => LifecycleEvent::ChildSessionEnd { id: None },
+        };
+        self.apply_lifecycle_event(&lifecycle);
+    }
+
+    /// Updates status from a vendor-neutral lifecycle event.
+    ///
+    /// Single source of truth for session-state transitions. Every
+    /// adapter (Claude, pi, future) funnels through this method.
+    pub fn apply_lifecycle_event(&mut self, event: &LifecycleEvent) {
         self.last_activity = Utc::now();
 
-        match event_type {
-            HookEventType::PreToolUse => {
-                if let Some(name) = tool_name {
-                    if is_interactive_tool(name) {
-                        self.status = SessionStatus::AttentionNeeded;
-                        self.current_activity = Some(ActivityDetail::new(name));
-                    } else {
-                        self.status = SessionStatus::Working;
-                        self.current_activity = Some(ActivityDetail::new(name));
-                    }
-                }
+        match event {
+            LifecycleEvent::SessionStart => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
             }
-            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
+            LifecycleEvent::SessionEnd { .. } => {
+                // Registry removes the session; this status is rarely
+                // observed, but keep it consistent.
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            LifecycleEvent::WorkingStart => {
                 self.status = SessionStatus::Working;
-                self.current_activity = Some(ActivityDetail::thinking());
+                self.current_activity = None;
             }
-            HookEventType::UserPromptSubmit => {
+            LifecycleEvent::WorkingEnd | LifecycleEvent::Idle => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            LifecycleEvent::PromptSubmit { .. } => {
                 self.status = SessionStatus::Working;
                 self.current_activity = None;
                 // first_prompt is set separately via set_first_prompt()
             }
-            HookEventType::Stop => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::NeedsInput { reason } => {
+                self.status = SessionStatus::AttentionNeeded;
+                self.current_activity = Some(activity_for_needs_input(reason));
             }
-            HookEventType::SessionStart => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::ToolCallStart { name } => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::new(name));
             }
-            HookEventType::SessionEnd => {
-                // Session will be removed by registry
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::ToolCallEnd { .. } => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::thinking());
             }
-            HookEventType::PreCompact => {
+            LifecycleEvent::ContextCompactStart => {
                 self.status = SessionStatus::Working;
                 self.current_activity = Some(ActivityDetail::with_context("Compacting"));
             }
-            HookEventType::Setup => {
-                self.status = SessionStatus::Working;
-                self.current_activity = Some(ActivityDetail::with_context("Setup"));
+            LifecycleEvent::ContextUpdate { .. } | LifecycleEvent::ProviderModelChange { .. } => {
+                // Metadata-only updates; status unchanged. Real cost/token
+                // application lives on the status-line path today; this
+                // hook is a placeholder for future pi-driven updates.
             }
-            HookEventType::Notification => {
-                // Notification handling is done separately with notification_type
-                // This is a fallback - don't change status
+            LifecycleEvent::Notification { kind, .. } => {
+                if kind.as_deref() == Some("setup") {
+                    self.status = SessionStatus::Working;
+                    self.current_activity = Some(ActivityDetail::with_context("Setup"));
+                }
+                // Other notifications: no status change. Permission /
+                // elicitation prompts arrive as `NeedsInput`, not
+                // `Notification`, after translation.
             }
-            HookEventType::SubagentStart | HookEventType::SubagentStop => {
-                // Subagent tracking deferred to future PR
+            LifecycleEvent::ChildSessionStart { .. } | LifecycleEvent::ChildSessionEnd { .. } => {
+                // Child-session correlation is tracked by the registry
+                // (subagent pending-list); status remains Working.
                 self.status = SessionStatus::Working;
+            }
+        }
+    }
+
+    /// Stores the first user prompt if not already set.
+    pub fn set_first_prompt_from_event(&mut self, event: &LifecycleEvent) {
+        if let LifecycleEvent::PromptSubmit {
+            prompt: Some(text),
+        } = event
+        {
+            if !text.is_empty() {
+                self.set_first_prompt(text);
             }
         }
     }
@@ -766,29 +840,6 @@ impl SessionDomain {
     pub fn set_first_prompt(&mut self, prompt: &str) {
         if self.first_prompt.is_none() && !prompt.is_empty() {
             self.first_prompt = Some(prompt.to_string());
-        }
-    }
-
-    /// Updates status based on a notification event.
-    pub fn apply_notification(&mut self, notification_type: Option<&str>) {
-        self.last_activity = Utc::now();
-
-        match notification_type {
-            Some("permission_prompt") => {
-                self.status = SessionStatus::AttentionNeeded;
-                self.current_activity = Some(ActivityDetail::with_context("Permission"));
-            }
-            Some("idle_prompt") => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
-            }
-            Some("elicitation_dialog") => {
-                self.status = SessionStatus::AttentionNeeded;
-                self.current_activity = Some(ActivityDetail::with_context("MCP Input"));
-            }
-            _ => {
-                // Informational notification - no status change
-            }
         }
     }
 
@@ -1005,6 +1056,19 @@ impl SessionInfrastructure {
     /// Returns recent tools (most recent first).
     pub fn recent_tools_iter(&self) -> impl Iterator<Item = &ToolUsageRecord> {
         self.recent_tools.iter().rev()
+    }
+}
+
+/// Activity-detail string for an `AttentionNeeded` state.
+fn activity_for_needs_input(reason: &NeedsInputReason) -> ActivityDetail {
+    match reason {
+        NeedsInputReason::InteractiveTool { tool_name }
+        | NeedsInputReason::PermissionGate { tool_name } => ActivityDetail::new(tool_name),
+        NeedsInputReason::Notification { kind } => match kind.as_str() {
+            "permission_prompt" => ActivityDetail::with_context("Permission"),
+            "elicitation_dialog" => ActivityDetail::with_context("MCP Input"),
+            other => ActivityDetail::with_context(other),
+        },
     }
 }
 
@@ -1367,7 +1431,7 @@ mod tests {
         let mut session = create_test_session("test-interactive");
 
         // PreToolUse with interactive tool → AttentionNeeded
-        session.apply_hook_event(HookEventType::PreToolUse, Some("AskUserQuestion"));
+        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("AskUserQuestion"));
 
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
@@ -1380,7 +1444,7 @@ mod tests {
         );
 
         // PostToolUse → back to Working (thinking)
-        session.apply_hook_event(HookEventType::PostToolUse, None);
+        session.apply_hook_event(ClaudeEventType::PostToolUse, None);
         assert_eq!(session.status, SessionStatus::Working);
     }
 
@@ -1389,7 +1453,7 @@ mod tests {
         let mut session = create_test_session("test-plan");
 
         // EnterPlanMode is also interactive
-        session.apply_hook_event(HookEventType::PreToolUse, Some("EnterPlanMode"));
+        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("EnterPlanMode"));
 
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
@@ -1407,7 +1471,7 @@ mod tests {
         let mut session = create_test_session("test-standard");
 
         // PreToolUse with standard tool → Working
-        session.apply_hook_event(HookEventType::PreToolUse, Some("Bash"));
+        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("Bash"));
 
         assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
@@ -1420,7 +1484,7 @@ mod tests {
         );
 
         // PostToolUse → still Working (thinking)
-        session.apply_hook_event(HookEventType::PostToolUse, Some("Bash"));
+        session.apply_hook_event(ClaudeEventType::PostToolUse, Some("Bash"));
         assert_eq!(session.status, SessionStatus::Working);
     }
 
@@ -1430,7 +1494,7 @@ mod tests {
         let original_status = session.status;
 
         // PreToolUse with None tool name should not change status
-        session.apply_hook_event(HookEventType::PreToolUse, None);
+        session.apply_hook_event(ClaudeEventType::PreToolUse, None);
 
         assert_eq!(
             session.status, original_status,
@@ -1444,7 +1508,7 @@ mod tests {
 
         // Empty string tool name - should be treated as standard tool
         // (is_interactive_tool returns false for empty strings)
-        session.apply_hook_event(HookEventType::PreToolUse, Some(""));
+        session.apply_hook_event(ClaudeEventType::PreToolUse, Some(""));
 
         assert_eq!(session.status, SessionStatus::Working);
     }

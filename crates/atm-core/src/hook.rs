@@ -30,21 +30,21 @@ pub fn is_interactive_tool(tool_name: &str) -> bool {
         )
 }
 
-/// All HookEventType variants paired with their string names.
+/// All ClaudeEventType variants paired with their string names.
 /// Single source of truth for string conversion.
-const HOOK_EVENT_VARIANTS: &[(HookEventType, &str)] = &[
-    (HookEventType::PreToolUse, "PreToolUse"),
-    (HookEventType::PostToolUse, "PostToolUse"),
-    (HookEventType::PostToolUseFailure, "PostToolUseFailure"),
-    (HookEventType::UserPromptSubmit, "UserPromptSubmit"),
-    (HookEventType::Stop, "Stop"),
-    (HookEventType::SubagentStart, "SubagentStart"),
-    (HookEventType::SubagentStop, "SubagentStop"),
-    (HookEventType::SessionStart, "SessionStart"),
-    (HookEventType::SessionEnd, "SessionEnd"),
-    (HookEventType::PreCompact, "PreCompact"),
-    (HookEventType::Setup, "Setup"),
-    (HookEventType::Notification, "Notification"),
+const HOOK_EVENT_VARIANTS: &[(ClaudeEventType, &str)] = &[
+    (ClaudeEventType::PreToolUse, "PreToolUse"),
+    (ClaudeEventType::PostToolUse, "PostToolUse"),
+    (ClaudeEventType::PostToolUseFailure, "PostToolUseFailure"),
+    (ClaudeEventType::UserPromptSubmit, "UserPromptSubmit"),
+    (ClaudeEventType::Stop, "Stop"),
+    (ClaudeEventType::SubagentStart, "SubagentStart"),
+    (ClaudeEventType::SubagentStop, "SubagentStop"),
+    (ClaudeEventType::SessionStart, "SessionStart"),
+    (ClaudeEventType::SessionEnd, "SessionEnd"),
+    (ClaudeEventType::PreCompact, "PreCompact"),
+    (ClaudeEventType::Setup, "Setup"),
+    (ClaudeEventType::Notification, "Notification"),
 ];
 
 /// Types of hook events from Claude Code.
@@ -52,7 +52,7 @@ const HOOK_EVENT_VARIANTS: &[(HookEventType, &str)] = &[
 /// All 12 Claude Code hook events, based on official documentation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
-pub enum HookEventType {
+pub enum ClaudeEventType {
     // === Tool Execution ===
     /// Before a tool is executed
     PreToolUse,
@@ -90,7 +90,7 @@ pub enum HookEventType {
     Notification,
 }
 
-impl HookEventType {
+impl ClaudeEventType {
     /// Returns the canonical string name for this event type.
     ///
     /// This is the single source of truth for event name strings,
@@ -145,7 +145,7 @@ impl HookEventType {
     }
 }
 
-impl fmt::Display for HookEventType {
+impl fmt::Display for ClaudeEventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
     }
@@ -158,17 +158,17 @@ mod tests {
     #[test]
     fn test_hook_event_parsing() {
         assert_eq!(
-            HookEventType::from_event_name("PreToolUse"),
-            Some(HookEventType::PreToolUse)
+            ClaudeEventType::from_event_name("PreToolUse"),
+            Some(ClaudeEventType::PreToolUse)
         );
-        assert_eq!(HookEventType::from_event_name("Unknown"), None);
+        assert_eq!(ClaudeEventType::from_event_name("Unknown"), None);
     }
 
     #[test]
     fn test_hook_event_classification() {
-        assert!(HookEventType::PreToolUse.is_pre_event());
-        assert!(HookEventType::PostToolUse.is_post_event());
-        assert!(!HookEventType::PreToolUse.is_post_event());
+        assert!(ClaudeEventType::PreToolUse.is_pre_event());
+        assert!(ClaudeEventType::PostToolUse.is_post_event());
+        assert!(!ClaudeEventType::PreToolUse.is_post_event());
     }
 
     #[test]
@@ -218,79 +218,79 @@ mod tests {
     fn test_hook_event_all_variants_parse() {
         // Tool events
         assert_eq!(
-            HookEventType::from_event_name("PreToolUse"),
-            Some(HookEventType::PreToolUse)
+            ClaudeEventType::from_event_name("PreToolUse"),
+            Some(ClaudeEventType::PreToolUse)
         );
         assert_eq!(
-            HookEventType::from_event_name("PostToolUse"),
-            Some(HookEventType::PostToolUse)
+            ClaudeEventType::from_event_name("PostToolUse"),
+            Some(ClaudeEventType::PostToolUse)
         );
         assert_eq!(
-            HookEventType::from_event_name("PostToolUseFailure"),
-            Some(HookEventType::PostToolUseFailure)
+            ClaudeEventType::from_event_name("PostToolUseFailure"),
+            Some(ClaudeEventType::PostToolUseFailure)
         );
 
         // User events
         assert_eq!(
-            HookEventType::from_event_name("UserPromptSubmit"),
-            Some(HookEventType::UserPromptSubmit)
+            ClaudeEventType::from_event_name("UserPromptSubmit"),
+            Some(ClaudeEventType::UserPromptSubmit)
         );
         assert_eq!(
-            HookEventType::from_event_name("Stop"),
-            Some(HookEventType::Stop)
+            ClaudeEventType::from_event_name("Stop"),
+            Some(ClaudeEventType::Stop)
         );
 
         // Subagent events
         assert_eq!(
-            HookEventType::from_event_name("SubagentStart"),
-            Some(HookEventType::SubagentStart)
+            ClaudeEventType::from_event_name("SubagentStart"),
+            Some(ClaudeEventType::SubagentStart)
         );
         assert_eq!(
-            HookEventType::from_event_name("SubagentStop"),
-            Some(HookEventType::SubagentStop)
+            ClaudeEventType::from_event_name("SubagentStop"),
+            Some(ClaudeEventType::SubagentStop)
         );
 
         // Session events
         assert_eq!(
-            HookEventType::from_event_name("SessionStart"),
-            Some(HookEventType::SessionStart)
+            ClaudeEventType::from_event_name("SessionStart"),
+            Some(ClaudeEventType::SessionStart)
         );
         assert_eq!(
-            HookEventType::from_event_name("SessionEnd"),
-            Some(HookEventType::SessionEnd)
+            ClaudeEventType::from_event_name("SessionEnd"),
+            Some(ClaudeEventType::SessionEnd)
         );
 
         // Context events
         assert_eq!(
-            HookEventType::from_event_name("PreCompact"),
-            Some(HookEventType::PreCompact)
+            ClaudeEventType::from_event_name("PreCompact"),
+            Some(ClaudeEventType::PreCompact)
         );
         assert_eq!(
-            HookEventType::from_event_name("Setup"),
-            Some(HookEventType::Setup)
+            ClaudeEventType::from_event_name("Setup"),
+            Some(ClaudeEventType::Setup)
         );
 
         // Notification
         assert_eq!(
-            HookEventType::from_event_name("Notification"),
-            Some(HookEventType::Notification)
+            ClaudeEventType::from_event_name("Notification"),
+            Some(ClaudeEventType::Notification)
         );
     }
 
     #[test]
     fn test_hook_event_classification_extended() {
         // Pre-events
-        assert!(HookEventType::PreToolUse.is_pre_event());
-        assert!(HookEventType::SessionStart.is_pre_event());
-        assert!(HookEventType::PreCompact.is_pre_event());
-        assert!(HookEventType::SubagentStart.is_pre_event());
-        assert!(HookEventType::Setup.is_pre_event());
+        assert!(ClaudeEventType::PreToolUse.is_pre_event());
+        assert!(ClaudeEventType::SessionStart.is_pre_event());
+        assert!(ClaudeEventType::PreCompact.is_pre_event());
+        assert!(ClaudeEventType::SubagentStart.is_pre_event());
+        assert!(ClaudeEventType::Setup.is_pre_event());
 
         // Post-events
-        assert!(HookEventType::PostToolUse.is_post_event());
-        assert!(HookEventType::PostToolUseFailure.is_post_event());
-        assert!(HookEventType::SessionEnd.is_post_event());
-        assert!(HookEventType::Stop.is_post_event());
-        assert!(HookEventType::SubagentStop.is_post_event());
+        assert!(ClaudeEventType::PostToolUse.is_post_event());
+        assert!(ClaudeEventType::PostToolUseFailure.is_post_event());
+        assert!(ClaudeEventType::SessionEnd.is_post_event());
+        assert!(ClaudeEventType::Stop.is_post_event());
+        assert!(ClaudeEventType::SubagentStop.is_post_event());
     }
 }

@@ -7,7 +7,7 @@
 //!
 //! All types are designed for async message passing and follow the panic-free policy.
 
-use atm_core::{AgentType, HookEventType, SessionDomain, SessionId, SessionView};
+use atm_core::{AgentType, LifecycleEvent, SessionDomain, SessionId, SessionView};
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -63,32 +63,24 @@ pub enum RegistryCommand {
         respond_to: oneshot::Sender<Result<(), RegistryError>>,
     },
 
-    /// Apply a hook event to a session.
+    /// Apply a vendor-neutral lifecycle event to a session.
     ///
-    /// Updates the session's status based on the event type
-    /// (e.g., PreToolUse sets RunningTool, PostToolUse sets Thinking).
+    /// Updates session status by dispatching on the `LifecycleEvent`
+    /// variant. The connection layer is responsible for translating raw
+    /// vendor events (Claude `RawHookEvent`, pi extension messages) into
+    /// `LifecycleEvent` before constructing this command.
     ///
     /// # Errors
     /// - `RegistryError::SessionNotFound` if the session doesn't exist
-    ApplyHookEvent {
+    ApplyLifecycleEvent {
         /// ID of the session to update
         session_id: SessionId,
-        /// Type of hook event
-        event_type: HookEventType,
-        /// Name of the tool (for tool-related events)
-        tool_name: Option<String>,
-        /// Notification type (for Notification events)
-        notification_type: Option<String>,
-        /// Process ID of the Claude Code process (for lifecycle tracking)
+        /// The vendor-neutral lifecycle event
+        event: LifecycleEvent,
+        /// Process ID of the agent process (for lifecycle tracking)
         pid: Option<u32>,
         /// Tmux pane ID if running in tmux
         tmux_pane: Option<String>,
-        /// Subagent agent ID (for SubagentStart/Stop events)
-        agent_id: Option<String>,
-        /// Subagent type (e.g., "explore", "plan")
-        agent_type: Option<String>,
-        /// User prompt text (for UserPromptSubmit events)
-        prompt: Option<String>,
         /// Channel to send the result
         respond_to: oneshot::Sender<Result<(), RegistryError>>,
     },
