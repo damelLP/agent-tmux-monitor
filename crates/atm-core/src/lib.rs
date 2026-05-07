@@ -16,6 +16,7 @@ pub mod lifecycle;
 pub mod model;
 pub mod project;
 pub mod session;
+pub mod tool;
 pub mod tree;
 
 // Re-exports for convenience
@@ -23,8 +24,9 @@ pub use agent::AgentType;
 pub use context::{ContextUsage, TokenCount};
 pub use cost::Money;
 pub use error::{DomainError, DomainResult};
-pub use hook::{is_interactive_tool, ClaudeEventType};
-pub use lifecycle::{LifecycleEvent, NeedsInputReason};
+pub use hook::ClaudeEventType;
+pub use lifecycle::{LifecycleEvent, NeedsInputReason, NotificationKind};
+pub use tool::Tool;
 pub use model::{derive_display_name, Model};
 pub use project::{resolve_project_root, resolve_worktree_info};
 pub use session::{

@@ -6,7 +6,7 @@
 //! Per CLAUDE.md: Tests CAN use `.unwrap()` and `.expect()` - this is allowed.
 //! We test the panic-free behavior of production code through assertions.
 
-use atm_core::{AgentType, LifecycleEvent, Model, SessionDomain, SessionId};
+use atm_core::{AgentType, LifecycleEvent, Model, SessionDomain, SessionId, Tool};
 use atmd::registry::{spawn_registry, RegistryError, RemovalReason, SessionEvent, MAX_SESSIONS};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -252,7 +252,9 @@ async fn test_event_subscription_hook_event_update() {
         .apply_lifecycle_event(
             SessionId::new("hook-event-test"),
             LifecycleEvent::ToolCallStart {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: None,
+                input: None,
             },
             None,
             None,
@@ -519,7 +521,9 @@ async fn test_hook_event_pre_tool_use() {
         .apply_lifecycle_event(
             SessionId::new("hook-pre"),
             LifecycleEvent::ToolCallStart {
-                name: "Write".into(),
+                name: Tool::Write,
+                tool_use_id: None,
+                input: None,
             },
             None,
             None,
@@ -549,7 +553,9 @@ async fn test_hook_event_post_tool_use() {
         .apply_lifecycle_event(
             SessionId::new("hook-post"),
             LifecycleEvent::ToolCallStart {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: None,
+                input: None,
             },
             None,
             None,
@@ -562,7 +568,8 @@ async fn test_hook_event_post_tool_use() {
         .apply_lifecycle_event(
             SessionId::new("hook-post"),
             LifecycleEvent::ToolCallEnd {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: None,
                 is_error: false,
             },
             None,
@@ -590,7 +597,9 @@ async fn test_hook_event_nonexistent_session() {
         .apply_lifecycle_event(
             SessionId::new("nonexistent"),
             LifecycleEvent::ToolCallStart {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: None,
+                input: None,
             },
             None,
             None,

@@ -1,7 +1,7 @@
 //! Session domain entities and value objects.
 
-use crate::hook::is_interactive_tool;
-use crate::lifecycle::{LifecycleEvent, NeedsInputReason};
+use crate::lifecycle::{LifecycleEvent, NeedsInputReason, NotificationKind};
+use crate::tool::Tool;
 use crate::{AgentType, ClaudeEventType, ContextUsage, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -715,32 +715,40 @@ impl SessionDomain {
     pub fn apply_hook_event(&mut self, event_type: ClaudeEventType, tool_name: Option<&str>) {
         let lifecycle = match event_type {
             ClaudeEventType::PreToolUse => match tool_name {
-                Some(name) if is_interactive_tool(name) => LifecycleEvent::NeedsInput {
-                    reason: NeedsInputReason::InteractiveTool {
-                        tool_name: name.to_string(),
-                    },
-                },
-                Some(name) => LifecycleEvent::ToolCallStart {
-                    name: name.to_string(),
-                },
+                Some(name) => {
+                    let tool = Tool::from(name);
+                    if tool.is_interactive() {
+                        LifecycleEvent::NeedsInput {
+                            reason: NeedsInputReason::InteractiveTool { tool },
+                        }
+                    } else {
+                        LifecycleEvent::ToolCallStart {
+                            name: tool,
+                            tool_use_id: None,
+                            input: None,
+                        }
+                    }
+                }
                 None => return,
             },
             ClaudeEventType::PostToolUse => LifecycleEvent::ToolCallEnd {
-                name: tool_name.unwrap_or("").to_string(),
+                name: Tool::from(tool_name.unwrap_or("")),
+                tool_use_id: None,
                 is_error: false,
             },
             ClaudeEventType::PostToolUseFailure => LifecycleEvent::ToolCallEnd {
-                name: tool_name.unwrap_or("").to_string(),
+                name: Tool::from(tool_name.unwrap_or("")),
+                tool_use_id: None,
                 is_error: true,
             },
             ClaudeEventType::UserPromptSubmit => LifecycleEvent::PromptSubmit { prompt: None },
             ClaudeEventType::Stop => LifecycleEvent::WorkingEnd,
-            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart,
+            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart { source: None },
             ClaudeEventType::SessionEnd => LifecycleEvent::SessionEnd { reason: None },
-            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart,
+            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart { trigger: None },
             ClaudeEventType::Setup => LifecycleEvent::Notification {
                 message: None,
-                kind: Some("setup".into()),
+                kind: Some(NotificationKind::Setup),
             },
             ClaudeEventType::Notification => LifecycleEvent::Notification {
                 message: None,
@@ -763,7 +771,7 @@ impl SessionDomain {
         self.last_activity = Utc::now();
 
         match event {
-            LifecycleEvent::SessionStart => {
+            LifecycleEvent::SessionStart { .. } => {
                 self.status = SessionStatus::Idle;
                 self.current_activity = None;
             }
@@ -790,15 +798,15 @@ impl SessionDomain {
                 self.status = SessionStatus::AttentionNeeded;
                 self.current_activity = Some(activity_for_needs_input(reason));
             }
-            LifecycleEvent::ToolCallStart { name } => {
+            LifecycleEvent::ToolCallStart { name, .. } => {
                 self.status = SessionStatus::Working;
-                self.current_activity = Some(ActivityDetail::new(name));
+                self.current_activity = Some(ActivityDetail::new(name.as_str()));
             }
             LifecycleEvent::ToolCallEnd { .. } => {
                 self.status = SessionStatus::Working;
                 self.current_activity = Some(ActivityDetail::thinking());
             }
-            LifecycleEvent::ContextCompactStart => {
+            LifecycleEvent::ContextCompactStart { .. } => {
                 self.status = SessionStatus::Working;
                 self.current_activity = Some(ActivityDetail::with_context("Compacting"));
             }
@@ -808,7 +816,7 @@ impl SessionDomain {
                 // hook is a placeholder for future pi-driven updates.
             }
             LifecycleEvent::Notification { kind, .. } => {
-                if kind.as_deref() == Some("setup") {
+                if matches!(kind, Some(NotificationKind::Setup)) {
                     self.status = SessionStatus::Working;
                     self.current_activity = Some(ActivityDetail::with_context("Setup"));
                 }
@@ -1062,12 +1070,13 @@ impl SessionInfrastructure {
 /// Activity-detail string for an `AttentionNeeded` state.
 fn activity_for_needs_input(reason: &NeedsInputReason) -> ActivityDetail {
     match reason {
-        NeedsInputReason::InteractiveTool { tool_name }
-        | NeedsInputReason::PermissionGate { tool_name } => ActivityDetail::new(tool_name),
-        NeedsInputReason::Notification { kind } => match kind.as_str() {
-            "permission_prompt" => ActivityDetail::with_context("Permission"),
-            "elicitation_dialog" => ActivityDetail::with_context("MCP Input"),
-            other => ActivityDetail::with_context(other),
+        NeedsInputReason::InteractiveTool { tool } | NeedsInputReason::PermissionGate { tool } => {
+            ActivityDetail::new(tool.as_str())
+        }
+        NeedsInputReason::Notification { kind } => match kind {
+            NotificationKind::PermissionPrompt => ActivityDetail::with_context("Permission"),
+            NotificationKind::ElicitationDialog => ActivityDetail::with_context("MCP Input"),
+            other => ActivityDetail::with_context(other.as_str()),
         },
     }
 }

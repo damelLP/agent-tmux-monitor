@@ -3,8 +3,8 @@
 //! Based on validated integration testing (Week 1).
 
 use atm_core::{
-    is_interactive_tool, ClaudeEventType, LifecycleEvent, NeedsInputReason, SessionDomain,
-    SessionId, StatusLineData,
+    ClaudeEventType, LifecycleEvent, NeedsInputReason, NotificationKind, SessionDomain, SessionId,
+    StatusLineData, Tool,
 };
 use serde::Deserialize;
 
@@ -277,25 +277,37 @@ impl RawHookEvent {
     /// distinctions where the underlying concept is vendor-neutral
     /// (e.g. `PostToolUse`/`PostToolUseFailure` both become
     /// `ToolCallEnd`, distinguished by `is_error`).
+    ///
+    /// Carry-through fidelity: `tool_use_id` (Claude `tool_use_id` /
+    /// pi `toolCallId`) and tool input rides `ToolCallStart`. `source`
+    /// (SessionStart), `reason` (SessionEnd), `trigger` (PreCompact),
+    /// and `prompt` (UserPromptSubmit) are preserved on their target
+    /// variants.
     pub fn to_lifecycle_event(&self) -> Option<LifecycleEvent> {
         let ev = self.event_type()?;
-        let tool_name = self.tool_name.clone().unwrap_or_default();
+        let tool = Tool::from(self.tool_name.as_deref().unwrap_or(""));
         Some(match ev {
             ClaudeEventType::PreToolUse => {
-                if is_interactive_tool(&tool_name) {
+                if tool.is_interactive() {
                     LifecycleEvent::NeedsInput {
-                        reason: NeedsInputReason::InteractiveTool { tool_name },
+                        reason: NeedsInputReason::InteractiveTool { tool },
                     }
                 } else {
-                    LifecycleEvent::ToolCallStart { name: tool_name }
+                    LifecycleEvent::ToolCallStart {
+                        name: tool,
+                        tool_use_id: self.tool_use_id.clone(),
+                        input: self.tool_input.clone(),
+                    }
                 }
             }
             ClaudeEventType::PostToolUse => LifecycleEvent::ToolCallEnd {
-                name: tool_name,
+                name: tool,
+                tool_use_id: self.tool_use_id.clone(),
                 is_error: false,
             },
             ClaudeEventType::PostToolUseFailure => LifecycleEvent::ToolCallEnd {
-                name: tool_name,
+                name: tool,
+                tool_use_id: self.tool_use_id.clone(),
                 is_error: true,
             },
             ClaudeEventType::UserPromptSubmit => LifecycleEvent::PromptSubmit {
@@ -309,32 +321,35 @@ impl RawHookEvent {
             ClaudeEventType::SubagentStop => LifecycleEvent::ChildSessionEnd {
                 id: self.agent_id.clone(),
             },
-            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart,
+            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart {
+                source: self.source.clone(),
+            },
             ClaudeEventType::SessionEnd => LifecycleEvent::SessionEnd {
                 reason: self.reason.clone(),
             },
-            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart,
+            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart {
+                trigger: self.trigger.clone(),
+            },
             ClaudeEventType::Setup => LifecycleEvent::Notification {
                 message: None,
-                kind: Some("setup".into()),
+                kind: Some(NotificationKind::Setup),
             },
-            ClaudeEventType::Notification => match self.notification_type.as_deref() {
-                Some("permission_prompt") | Some("elicitation_dialog") => {
-                    LifecycleEvent::NeedsInput {
+            ClaudeEventType::Notification => {
+                let kind = self.notification_type.as_deref().map(NotificationKind::from);
+                match kind {
+                    Some(NotificationKind::PermissionPrompt)
+                    | Some(NotificationKind::ElicitationDialog) => LifecycleEvent::NeedsInput {
                         reason: NeedsInputReason::Notification {
-                            kind: self
-                                .notification_type
-                                .clone()
-                                .unwrap_or_else(|| "permission_prompt".into()),
+                            kind: kind.unwrap_or(NotificationKind::PermissionPrompt),
                         },
-                    }
+                    },
+                    Some(NotificationKind::IdlePrompt) => LifecycleEvent::Idle,
+                    _ => LifecycleEvent::Notification {
+                        message: self.message.clone(),
+                        kind,
+                    },
                 }
-                Some("idle_prompt") => LifecycleEvent::Idle,
-                _ => LifecycleEvent::Notification {
-                    message: self.message.clone(),
-                    kind: self.notification_type.clone(),
-                },
-            },
+            }
         })
     }
 }
@@ -704,30 +719,48 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_pre_tool_use_non_interactive() {
+    fn lifecycle_pre_tool_use_non_interactive_carries_tool_use_id_and_input() {
         let mut e = raw("PreToolUse");
         e.tool_name = Some("Bash".into());
+        e.tool_use_id = Some("toolu_01abc".into());
+        e.tool_input = Some(serde_json::json!({"command": "ls"}));
         assert_eq!(
             e.to_lifecycle_event(),
             Some(LifecycleEvent::ToolCallStart {
-                name: "Bash".into()
+                name: Tool::Bash,
+                tool_use_id: Some("toolu_01abc".into()),
+                input: Some(serde_json::json!({"command": "ls"})),
             })
         );
     }
 
     #[test]
+    fn lifecycle_pre_tool_use_unknown_tool_lands_in_other() {
+        let mut e = raw("PreToolUse");
+        e.tool_name = Some("mcp__github__list_issues".into());
+        match e.to_lifecycle_event() {
+            Some(LifecycleEvent::ToolCallStart { name, .. }) => {
+                assert_eq!(name, Tool::Other("mcp__github__list_issues".into()));
+            }
+            other => panic!("expected ToolCallStart, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn lifecycle_pre_tool_use_interactive_becomes_needs_input() {
-        for tool in ["AskUserQuestion", "EnterPlanMode", "ExitPlanMode"] {
+        for (name, expected) in [
+            ("AskUserQuestion", Tool::AskUserQuestion),
+            ("EnterPlanMode", Tool::EnterPlanMode),
+            ("ExitPlanMode", Tool::ExitPlanMode),
+        ] {
             let mut e = raw("PreToolUse");
-            e.tool_name = Some(tool.into());
+            e.tool_name = Some(name.into());
             assert_eq!(
                 e.to_lifecycle_event(),
                 Some(LifecycleEvent::NeedsInput {
-                    reason: NeedsInputReason::InteractiveTool {
-                        tool_name: tool.into()
-                    }
+                    reason: NeedsInputReason::InteractiveTool { tool: expected }
                 }),
-                "tool {tool} should map to NeedsInput"
+                "tool {name} should map to NeedsInput"
             );
         }
     }
@@ -736,20 +769,24 @@ mod tests {
     fn lifecycle_post_tool_use_distinguishes_failure() {
         let mut ok = raw("PostToolUse");
         ok.tool_name = Some("Bash".into());
+        ok.tool_use_id = Some("toolu_xyz".into());
         let mut fail = raw("PostToolUseFailure");
         fail.tool_name = Some("Bash".into());
+        fail.tool_use_id = Some("toolu_xyz".into());
 
         assert_eq!(
             ok.to_lifecycle_event(),
             Some(LifecycleEvent::ToolCallEnd {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: Some("toolu_xyz".into()),
                 is_error: false,
             })
         );
         assert_eq!(
             fail.to_lifecycle_event(),
             Some(LifecycleEvent::ToolCallEnd {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: Some("toolu_xyz".into()),
                 is_error: true,
             })
         );
@@ -799,12 +836,19 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_session_lifecycle() {
+    fn lifecycle_session_start_carries_source() {
+        let mut e = raw("SessionStart");
+        e.source = Some("resume".into());
         assert_eq!(
-            raw("SessionStart").to_lifecycle_event(),
-            Some(LifecycleEvent::SessionStart)
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::SessionStart {
+                source: Some("resume".into())
+            })
         );
+    }
 
+    #[test]
+    fn lifecycle_session_end_carries_reason() {
         let mut end = raw("SessionEnd");
         end.reason = Some("clear".into());
         assert_eq!(
@@ -816,10 +860,14 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_pre_compact_to_context_compact_start() {
+    fn lifecycle_pre_compact_carries_trigger() {
+        let mut e = raw("PreCompact");
+        e.trigger = Some("auto".into());
         assert_eq!(
-            raw("PreCompact").to_lifecycle_event(),
-            Some(LifecycleEvent::ContextCompactStart)
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::ContextCompactStart {
+                trigger: Some("auto".into())
+            })
         );
     }
 
@@ -829,7 +877,7 @@ mod tests {
             raw("Setup").to_lifecycle_event(),
             Some(LifecycleEvent::Notification {
                 message: None,
-                kind: Some("setup".into()),
+                kind: Some(NotificationKind::Setup),
             })
         );
     }
@@ -842,7 +890,7 @@ mod tests {
             e.to_lifecycle_event(),
             Some(LifecycleEvent::NeedsInput {
                 reason: NeedsInputReason::Notification {
-                    kind: "permission_prompt".into()
+                    kind: NotificationKind::PermissionPrompt,
                 }
             })
         );
@@ -864,7 +912,7 @@ mod tests {
             e.to_lifecycle_event(),
             Some(LifecycleEvent::Notification {
                 message: Some("hi".into()),
-                kind: Some("info".into()),
+                kind: Some(NotificationKind::Info),
             })
         );
     }

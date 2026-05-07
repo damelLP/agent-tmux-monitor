@@ -272,7 +272,7 @@ impl RegistryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{AgentType, Model};
+    use atm_core::{AgentType, Model, Tool};
 
     fn create_test_handle() -> (RegistryHandle, mpsc::Receiver<RegistryCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -445,7 +445,9 @@ mod tests {
                 assert_eq!(
                     event,
                     LifecycleEvent::ToolCallStart {
-                        name: "Bash".into()
+                        name: Tool::Bash,
+                        tool_use_id: None,
+                        input: None,
                     }
                 );
                 assert_eq!(pid, Some(12345));
@@ -460,7 +462,9 @@ mod tests {
             .apply_lifecycle_event(
                 SessionId::new("test-123"),
                 LifecycleEvent::ToolCallStart {
-                    name: "Bash".into(),
+                    name: Tool::Bash,
+                    tool_use_id: None,
+                    input: None,
                 },
                 Some(12345),
                 Some("%5".to_string()),

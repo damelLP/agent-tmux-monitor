@@ -1087,12 +1087,12 @@ impl RegistryActor {
 /// Used to record tool usage on the session's infrastructure record.
 fn tool_name_from_event(event: &LifecycleEvent) -> Option<String> {
     match event {
-        LifecycleEvent::ToolCallStart { name } | LifecycleEvent::ToolCallEnd { name, .. } => {
-            Some(name.clone())
+        LifecycleEvent::ToolCallStart { name, .. } | LifecycleEvent::ToolCallEnd { name, .. } => {
+            Some(name.as_str().to_string())
         }
         LifecycleEvent::NeedsInput { reason } => match reason {
-            NeedsInputReason::InteractiveTool { tool_name }
-            | NeedsInputReason::PermissionGate { tool_name } => Some(tool_name.clone()),
+            NeedsInputReason::InteractiveTool { tool }
+            | NeedsInputReason::PermissionGate { tool } => Some(tool.as_str().to_string()),
             NeedsInputReason::Notification { .. } => None,
         },
         _ => None,
@@ -1123,7 +1123,7 @@ fn is_descendant_of(pid: u32, ancestor_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{AgentType, Model};
+    use atm_core::{AgentType, Model, Tool};
     use tokio::sync::oneshot;
 
     fn create_test_session(id: &str) -> SessionDomain {
@@ -1334,7 +1334,9 @@ mod tests {
         actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("test-123"),
             event: LifecycleEvent::ToolCallStart {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: None,
+                input: None,
             },
             pid: None,
             tmux_pane: None,

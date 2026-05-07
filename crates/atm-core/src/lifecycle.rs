@@ -23,8 +23,93 @@
 //!    provider-agnostic — one session can switch from Anthropic to
 //!    OpenAI mid-stream — so changes ride a dedicated
 //!    `ProviderModelChange` variant rather than annotating every event.
+//!
+//! Tool identity rides the typed `Tool` enum instead of free strings,
+//! so the well-known set is defined once and the open tail of MCP /
+//! vendor-specific names lives in `Tool::Other(String)`.
 
+use crate::Tool;
 use serde::{Deserialize, Serialize};
+
+/// Sub-kind of a notification, for the cases the daemon special-cases.
+///
+/// Pi doesn't use these strings — its permission gating is extension-
+/// mediated and surfaces via `NeedsInputReason::PermissionGate`. The
+/// known variants here are Claude `Notification(notification_type)`
+/// values plus the `setup` synthetic kind we emit when translating
+/// Claude's one-time `Setup` hook event.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(into = "String", from = "String")]
+pub enum NotificationKind {
+    /// Claude permission prompt — agent is waiting on a yes/no.
+    PermissionPrompt,
+    /// Claude MCP elicitation — extension wants structured input.
+    ElicitationDialog,
+    /// Claude idle prompt — agent has gone idle.
+    IdlePrompt,
+    /// Claude one-time `Setup` hook (renamed from raw event).
+    Setup,
+    /// Generic informational notification.
+    Info,
+    /// Any other notification kind (vendor-specific, future kinds).
+    Other(String),
+}
+
+impl NotificationKind {
+    /// Wire-format string for this kind.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::PermissionPrompt => "permission_prompt",
+            Self::ElicitationDialog => "elicitation_dialog",
+            Self::IdlePrompt => "idle_prompt",
+            Self::Setup => "setup",
+            Self::Info => "info",
+            Self::Other(s) => s.as_str(),
+        }
+    }
+}
+
+impl std::fmt::Display for NotificationKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl From<&str> for NotificationKind {
+    fn from(s: &str) -> Self {
+        match s {
+            "permission_prompt" => Self::PermissionPrompt,
+            "elicitation_dialog" => Self::ElicitationDialog,
+            "idle_prompt" => Self::IdlePrompt,
+            "setup" => Self::Setup,
+            "info" => Self::Info,
+            other => Self::Other(other.to_string()),
+        }
+    }
+}
+
+impl From<String> for NotificationKind {
+    fn from(s: String) -> Self {
+        match s.as_str() {
+            "permission_prompt" => Self::PermissionPrompt,
+            "elicitation_dialog" => Self::ElicitationDialog,
+            "idle_prompt" => Self::IdlePrompt,
+            "setup" => Self::Setup,
+            "info" => Self::Info,
+            _ => Self::Other(s),
+        }
+    }
+}
+
+impl From<NotificationKind> for String {
+    fn from(k: NotificationKind) -> Self {
+        match k {
+            NotificationKind::Other(s) => s,
+            other => other.as_str().to_string(),
+        }
+    }
+}
 
 /// Why a session is awaiting user input.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -32,12 +117,12 @@ use serde::{Deserialize, Serialize};
 pub enum NeedsInputReason {
     /// Claude `PreToolUse` for an interactive tool
     /// (`AskUserQuestion`, `EnterPlanMode`, `ExitPlanMode`).
-    InteractiveTool { tool_name: String },
+    InteractiveTool { tool: Tool },
     /// Pi extension-mediated `tool_call` permission gate.
-    PermissionGate { tool_name: String },
+    PermissionGate { tool: Tool },
     /// Generic notification-driven prompt
     /// (Claude `Notification(permission_prompt|elicitation_dialog)`).
-    Notification { kind: String },
+    Notification { kind: NotificationKind },
 }
 
 /// Vendor-neutral lifecycle event.
@@ -50,12 +135,12 @@ pub enum NeedsInputReason {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum LifecycleEvent {
-    /// Session opened.
-    SessionStart,
+    /// Session opened. `source` carries why (Claude: `startup`/`resume`/
+    /// `clear`; pi: `startup`).
+    SessionStart { source: Option<String> },
 
     /// Session closed. `reason` is vendor-supplied when available
-    /// (pi `session_shutdown.reason`); `None` for vendors that don't
-    /// distinguish exit reasons.
+    /// (pi `session_shutdown.reason`; Claude `SessionEnd.reason`).
     SessionEnd { reason: Option<String> },
 
     /// Agent began a working block.
@@ -79,13 +164,27 @@ pub enum LifecycleEvent {
     NeedsInput { reason: NeedsInputReason },
 
     /// A tool started executing.
-    ToolCallStart { name: String },
+    ///
+    /// `tool_use_id` is the correlation id pairing this with its later
+    /// `ToolCallEnd` (Claude `tool_use_id`, pi `toolCallId`). `input`
+    /// is the tool arguments JSON, when the vendor exposes it.
+    ToolCallStart {
+        name: Tool,
+        tool_use_id: Option<String>,
+        input: Option<serde_json::Value>,
+    },
 
-    /// A tool finished executing.
-    ToolCallEnd { name: String, is_error: bool },
+    /// A tool finished executing. `tool_use_id` matches the originating
+    /// `ToolCallStart`.
+    ToolCallEnd {
+        name: Tool,
+        tool_use_id: Option<String>,
+        is_error: bool,
+    },
 
-    /// Context compaction is starting.
-    ContextCompactStart,
+    /// Context compaction is starting. `trigger` is the cause
+    /// (Claude: `auto`/`manual`).
+    ContextCompactStart { trigger: Option<String> },
 
     /// Periodic context-usage update (tokens used, accumulated cost).
     /// Either field may be `None` if the vendor doesn't expose it.
@@ -101,11 +200,10 @@ pub enum LifecycleEvent {
     },
 
     /// Free-form notification surfaced to the user. `kind` carries an
-    /// optional sub-type the UI can render specially (e.g. `"setup"`,
-    /// `"info"`).
+    /// optional sub-type the UI can render specially.
     Notification {
         message: Option<String>,
-        kind: Option<String>,
+        kind: Option<NotificationKind>,
     },
 
     /// A child session (subagent / task / fork) started.
@@ -124,7 +222,10 @@ impl LifecycleEvent {
     /// True if this event ends/clears the session's working state.
     #[must_use]
     pub fn is_terminal_for_turn(&self) -> bool {
-        matches!(self, Self::WorkingEnd | Self::Idle | Self::SessionEnd { .. })
+        matches!(
+            self,
+            Self::WorkingEnd | Self::Idle | Self::SessionEnd { .. }
+        )
     }
 
     /// True if this event opens the session's working state.
@@ -132,7 +233,7 @@ impl LifecycleEvent {
     pub fn is_starting(&self) -> bool {
         matches!(
             self,
-            Self::SessionStart | Self::WorkingStart | Self::PromptSubmit { .. }
+            Self::SessionStart { .. } | Self::WorkingStart | Self::PromptSubmit { .. }
         )
     }
 }
@@ -144,7 +245,9 @@ mod tests {
     #[test]
     fn lifecycle_event_serde_roundtrip() {
         let cases = vec![
-            LifecycleEvent::SessionStart,
+            LifecycleEvent::SessionStart {
+                source: Some("startup".into()),
+            },
             LifecycleEvent::SessionEnd {
                 reason: Some("quit".into()),
             },
@@ -156,25 +259,30 @@ mod tests {
             },
             LifecycleEvent::NeedsInput {
                 reason: NeedsInputReason::InteractiveTool {
-                    tool_name: "AskUserQuestion".into(),
+                    tool: Tool::AskUserQuestion,
                 },
             },
             LifecycleEvent::NeedsInput {
-                reason: NeedsInputReason::PermissionGate {
-                    tool_name: "bash".into(),
-                },
+                reason: NeedsInputReason::PermissionGate { tool: Tool::Bash },
             },
             LifecycleEvent::NeedsInput {
                 reason: NeedsInputReason::Notification {
-                    kind: "permission_prompt".into(),
+                    kind: NotificationKind::PermissionPrompt,
                 },
             },
-            LifecycleEvent::ToolCallStart { name: "Bash".into() },
+            LifecycleEvent::ToolCallStart {
+                name: Tool::Bash,
+                tool_use_id: Some("tu_123".into()),
+                input: Some(serde_json::json!({"command": "ls /tmp"})),
+            },
             LifecycleEvent::ToolCallEnd {
-                name: "Bash".into(),
+                name: Tool::Bash,
+                tool_use_id: Some("tu_123".into()),
                 is_error: false,
             },
-            LifecycleEvent::ContextCompactStart,
+            LifecycleEvent::ContextCompactStart {
+                trigger: Some("auto".into()),
+            },
             LifecycleEvent::ContextUpdate {
                 tokens: Some(1024),
                 cost_usd: Some(0.05),
@@ -185,7 +293,7 @@ mod tests {
             },
             LifecycleEvent::Notification {
                 message: Some("hi".into()),
-                kind: Some("info".into()),
+                kind: Some(NotificationKind::Info),
             },
             LifecycleEvent::ChildSessionStart {
                 id: Some("agent-1".into()),
@@ -210,9 +318,32 @@ mod tests {
         assert!(LifecycleEvent::SessionEnd { reason: None }.is_terminal_for_turn());
         assert!(!LifecycleEvent::WorkingStart.is_terminal_for_turn());
 
-        assert!(LifecycleEvent::SessionStart.is_starting());
+        assert!(LifecycleEvent::SessionStart { source: None }.is_starting());
         assert!(LifecycleEvent::WorkingStart.is_starting());
         assert!(LifecycleEvent::PromptSubmit { prompt: None }.is_starting());
         assert!(!LifecycleEvent::WorkingEnd.is_starting());
+    }
+
+    #[test]
+    fn notification_kind_wire_format_known() {
+        assert_eq!(
+            serde_json::to_string(&NotificationKind::PermissionPrompt).unwrap(),
+            "\"permission_prompt\""
+        );
+        assert_eq!(
+            serde_json::from_str::<NotificationKind>("\"permission_prompt\"").unwrap(),
+            NotificationKind::PermissionPrompt
+        );
+    }
+
+    #[test]
+    fn notification_kind_other_passthrough() {
+        let custom = NotificationKind::Other("vendor_specific".into());
+        let json = serde_json::to_string(&custom).unwrap();
+        assert_eq!(json, "\"vendor_specific\"");
+        assert_eq!(
+            serde_json::from_str::<NotificationKind>(&json).unwrap(),
+            custom
+        );
     }
 }
