@@ -824,6 +824,210 @@ async fn test_e2e_notification_permission_prompt_becomes_needs_input() {
     server.shutdown().await;
 }
 
+// ============================================================================
+// Pi Event → LifecycleEvent translation (end-to-end, wire-level)
+//
+// Symmetric with the Claude e2e block above. These tests drive
+// pi-shaped JSON through MessageType::PiEvent and confirm the
+// connection layer hands off to atm-pi-adapter and produces the
+// expected session state. They are the wire-level counterpart to
+// the unit tests in atm-pi-adapter::translate.
+// ============================================================================
+
+fn pi_event_json(event: &str, payload: serde_json::Value) -> serde_json::Value {
+    // No pid — the test session is registered with a synthetic PID;
+    // the registry resolves via `session_id_to_pid`. (Production traffic
+    // from the pi extension WILL include pid; tests covering that path
+    // would also pass it explicitly.)
+    serde_json::json!({
+        "event": event,
+        "payload": payload,
+        "session_id": "e2e-pi",
+    })
+}
+
+#[tokio::test]
+async fn test_e2e_pi_tool_call_translates_to_tool_call_start() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // Pi tool_call (the canonical "tool starting" signal in pi).
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "tool_call",
+            serde_json::json!({
+                "type": "tool_call",
+                "toolName": "Bash",
+                "toolCallId": "toolu_pi_demo",
+                "input": {"command": "ls"}
+            }),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should exist");
+    assert_eq!(view.status_label, "working");
+    assert_eq!(view.activity_detail, Some("Bash".into()));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pi_permission_gate_becomes_needs_input() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // tool_call with needs_user_input=true is the extension's signal
+    // that pi has reached ctx.ui.select(...) and is awaiting the user.
+    // This is the load-bearing "NeedsInput requires extension
+    // participation" finding from the spike.
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "tool_call",
+            serde_json::json!({
+                "type": "tool_call",
+                "toolName": "Bash",
+                "toolCallId": "toolu_dangerous",
+                "needs_user_input": true
+            }),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should exist");
+    assert_eq!(view.status_label, "needs input");
+    assert_eq!(view.activity_detail, Some("Bash".into()));
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pi_agent_end_translates_to_idle() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    // Drive Working then Idle.
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "agent_start",
+            serde_json::json!({"type":"agent_start"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "agent_end",
+            serde_json::json!({"type":"agent_end"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session should still exist");
+    assert_eq!(view.status_label, "idle");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pi_session_shutdown_removes_session() {
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "session_shutdown",
+            serde_json::json!({"type":"session_shutdown","reason":"quit"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    assert!(
+        registry.get_session(session_id.clone()).await.is_none(),
+        "session_shutdown should remove the session"
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pi_suppressed_event_does_not_panic_or_disrupt() {
+    // tool_execution_start is suppressed by the adapter (returns None
+    // from to_lifecycle_event). The connection layer should accept it
+    // silently and leave session state unchanged.
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    let before = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("exists");
+
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "tool_execution_start",
+            serde_json::json!({
+                "type":"tool_execution_start",
+                "toolName":"ls",
+                "toolCallId":"call_x"
+            }),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let after = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("still exists");
+    assert_eq!(before.status_label, after.status_label);
+
+    server.shutdown().await;
+}
+
 #[tokio::test]
 async fn test_concurrent_ping_pong() {
     let server = TestServer::spawn().await;

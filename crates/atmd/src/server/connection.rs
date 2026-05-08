@@ -24,6 +24,7 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use atm_claude_adapter::RawHookEvent;
+use atm_pi_adapter::RawPiEvent;
 use atm_core::SessionId;
 use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion};
 
@@ -277,6 +278,10 @@ impl ConnectionHandler {
                 self.handle_hook_event(data).await?;
             }
 
+            MessageType::PiEvent { data } => {
+                self.handle_pi_event(data).await?;
+            }
+
             MessageType::ListSessions => {
                 let sessions = self.registry.get_all_sessions().await;
                 self.send_message(DaemonMessage::session_list(sessions))
@@ -424,6 +429,55 @@ impl ConnectionHandler {
 
         self.registry
             .apply_lifecycle_event(session_id, lifecycle, pid, tmux_pane)
+            .await
+            .map_err(|e| ConnectionError::RegistryError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Handles a pi event from the pi extension.
+    ///
+    /// Symmetric with [`Self::handle_hook_event`] — parses raw pi-shaped
+    /// JSON via `atm-pi-adapter`, translates into a vendor-neutral
+    /// `LifecycleEvent`, and forwards to the registry.
+    async fn handle_pi_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
+        info!(client_id = ?self.client_id, "Received pi event data");
+
+        let raw_event: RawPiEvent =
+            serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
+
+        info!(
+            session_id = ?raw_event.session_id,
+            event = %raw_event.event,
+            pid = ?raw_event.pid,
+            tmux_pane = ?raw_event.tmux_pane,
+            "Processing pi event"
+        );
+
+        // Pi adapter intentionally returns None for events it suppresses
+        // (e.g. tool_execution_start/tool_result paired duplicates) and
+        // for high-frequency internal events. Skip those silently.
+        let lifecycle = match raw_event.to_lifecycle_event() {
+            Some(le) => le,
+            None => {
+                debug!(event = %raw_event.event, "pi event suppressed by adapter");
+                return Ok(());
+            }
+        };
+
+        // Pi events identify their session via the extension-injected
+        // `session_id` field. Fall back to a synthetic id derived from
+        // pid if absent (matches Claude path's behavior for the
+        // create-on-first-event flow).
+        let session_id = atm_core::SessionId::new(
+            raw_event
+                .session_id
+                .as_deref()
+                .unwrap_or("pi-session-unknown"),
+        );
+
+        self.registry
+            .apply_lifecycle_event(session_id, lifecycle, raw_event.pid, raw_event.tmux_pane)
             .await
             .map_err(|e| ConnectionError::RegistryError(e.to_string()))?;
 

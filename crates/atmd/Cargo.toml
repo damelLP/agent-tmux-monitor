@@ -18,6 +18,7 @@ path = "src/lib.rs"
 atm-core = { workspace = true }
 atm-protocol = { workspace = true }
 atm-claude-adapter = { workspace = true }
+atm-pi-adapter = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }
