@@ -453,12 +453,13 @@ fn compact_session_list_narrow() {
 
 #[test]
 fn compact_preview_falls_back_to_status() {
-    // project_root points to a non-existent path so beads lookup returns
-    // empty and the renderer falls back to displaying the status line.
-    // This keeps the test deterministic without an FS fixture.
-    let session = make_session(
+    // Both project_root and worktree_path are None, so the renderer's
+    // beads lookup short-circuits before touching the filesystem and the
+    // status-line fallback kicks in. Strictly deterministic — no probe,
+    // no chance of a stray .beads/ on the dev/CI host changing the snapshot.
+    let mut session = make_session(
         "abc12345-aaaa-bbbb-cccc-000000000001",
-        "/nonexistent/atm-snapshot-test",
+        "/home/dev/project-alpha",
         "main",
         "Opus 4.5",
         SessionStatus::Working,
@@ -467,6 +468,8 @@ fn compact_preview_falls_back_to_status() {
         0.50,
         "2026-01-15T10:05:00Z",
     );
+    session.project_root = None;
+    session.worktree_path = None;
     let buf = render_buffer(30, 8, |frame, area| {
         render_compact_preview(frame, area, Some(&session), &[]);
     });

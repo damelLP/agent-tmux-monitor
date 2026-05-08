@@ -33,5 +33,5 @@ clap = { workspace = true }
 dirs = "5.0"
 
 [dev-dependencies]
-insta = "1"
+insta = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
