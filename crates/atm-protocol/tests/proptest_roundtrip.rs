@@ -147,68 +147,144 @@ fn arb_session_status() -> impl Strategy<Value = SessionStatus> {
     ]
 }
 
-/// Builds a `SessionView` populated from individual strategies.
+/// Strategy for RFC3339-ish timestamp strings.
 ///
-/// We start from `Default::default()` and only override the fields that are
-/// part of the public wire format — defaults for the others are already
-/// round-trip-safe (empty strings, zeroed numerics, etc.).
-fn arb_session_view() -> impl Strategy<Value = SessionView> {
-    // Proptest's `Strategy` impl for tuples maxes out at 12 elements, so we
-    // group the f64 fields together to stay under the limit.
-    let numerics = (arb_realistic_f64(), arb_realistic_f64(), arb_realistic_f64());
+/// These fields are plain `String` on the wire (formatted upstream and
+/// parsed downstream by callers, not by the protocol crate), so we mix
+/// realistic shapes with the general tricky-string strategy. The point is
+/// to confirm the protocol layer doesn't mangle whatever it's handed.
+fn arb_timestamp_string() -> impl Strategy<Value = String> {
+    prop_oneof![
+        Just("1970-01-01T00:00:00+00:00".to_string()),
+        Just("2026-05-08T12:34:56.789Z".to_string()),
+        Just("9999-12-31T23:59:59-12:00".to_string()),
+        arb_tricky_string(),
+    ]
+}
 
-    (
+/// Builds a fully-populated `SessionView`.
+///
+/// Every field that appears on the wire is independently generated. We
+/// derive `id_short`, `status_label`, `status_icon`, and `should_blink`
+/// from `id`/`status` because those mirror what `SessionView::from_domain`
+/// does in production — round-trip equality wouldn't be meaningful if we
+/// fed the type inconsistent state.
+///
+/// Implementation notes:
+/// - Proptest's tuple `Strategy` impl maxes out at 12 elements, so fields
+///   are grouped into themed bundles.
+/// - Each bundle is `.boxed()` to type-erase the intermediate `Strategy`.
+///   Without boxing, the monomorphized generic type for the full chain
+///   overflows the default 2 MiB test thread stack on debug builds.
+fn arb_session_view() -> impl Strategy<Value = SessionView> {
+    // Identity + status (4)
+    let identity = (
         arb_session_id(),
-        arb_tricky_string(),
-        arb_tricky_string(),
+        arb_tricky_string(), // agent_type
+        arb_tricky_string(), // model
         arb_session_status(),
-        numerics,
-        proptest::option::of(arb_tricky_string()),
-        proptest::option::of(arb_tricky_string()),
-        proptest::option::of(arb_tricky_string()),
+    )
+        .boxed();
+
+    // Numerics (3 f64s)
+    let numerics =
+        (arb_realistic_f64(), arb_realistic_f64(), arb_realistic_f64()).boxed();
+
+    // Display strings (6)
+    let displays = (
+        arb_tricky_string(), // context_display
+        arb_tricky_string(), // cost_display
+        arb_tricky_string(), // duration_display
+        arb_tricky_string(), // lines_display
+        arb_tricky_string(), // last_activity_display
+        arb_tricky_string(), // age_display
+    )
+        .boxed();
+
+    // Independent booleans (3) — context_warning/critical/needs_attention
+    // are not derived from the f64 in SessionView; they're carried verbatim
+    // from the domain. Vary them independently to catch bool-field bugs.
+    let bools = (any::<bool>(), any::<bool>(), any::<bool>()).boxed();
+
+    // Optional strings (4)
+    let opts = (
+        proptest::option::of(arb_tricky_string()), // activity_detail
+        proptest::option::of(arb_tricky_string()), // working_directory
+        proptest::option::of(arb_tricky_string()), // tmux_pane
+        proptest::option::of(arb_tricky_string()), // first_prompt
+    )
+        .boxed();
+
+    // Git-related optionals (3)
+    let git = (
+        proptest::option::of(arb_tricky_string()), // project_root
+        proptest::option::of(arb_tricky_string()), // worktree_path
+        proptest::option::of(arb_tricky_string()), // worktree_branch
+    )
+        .boxed();
+
+    // Session relations
+    let relations = (
         proptest::option::of(arb_session_id()),
         proptest::collection::vec(arb_session_id(), 0..4),
-        proptest::option::of(arb_tricky_string()),
+    )
+        .boxed();
+
+    // Timestamps (2 strings)
+    let timestamps = (arb_timestamp_string(), arb_timestamp_string()).boxed();
+
+    (
+        identity, numerics, displays, bools, opts, git, relations, timestamps,
     )
         .prop_map(
             |(
+                (id, agent_type, model, status),
+                (ctx_pct, cost_usd, duration_seconds),
+                (
+                    context_display,
+                    cost_display,
+                    duration_display,
+                    lines_display,
+                    last_activity_display,
+                    age_display,
+                ),
+                (context_warning, context_critical, needs_attention),
+                (activity_detail, working_directory, tmux_pane, first_prompt),
+                (project_root, worktree_path, worktree_branch),
+                (parent_session_id, child_session_ids),
+                (started_at, last_activity),
+            )| SessionView {
+                id_short: id.short().to_string(),
                 id,
                 agent_type,
                 model,
                 status,
-                (ctx_pct, cost_usd, duration_seconds),
+                status_label: status.label().to_string(),
+                activity_detail,
+                should_blink: status.should_blink(),
+                status_icon: status.icon().to_string(),
+                context_percentage: ctx_pct,
+                context_display,
+                context_warning,
+                context_critical,
+                cost_display,
+                cost_usd,
+                duration_display,
+                duration_seconds,
+                lines_display,
+                working_directory,
+                needs_attention,
+                last_activity_display,
+                age_display,
+                started_at,
+                last_activity,
+                tmux_pane,
                 project_root,
                 worktree_path,
                 worktree_branch,
-                parent,
-                children,
+                parent_session_id,
+                child_session_ids,
                 first_prompt,
-            )| {
-                let mut view = SessionView {
-                    id_short: id.short().to_string(),
-                    id,
-                    agent_type,
-                    model,
-                    status,
-                    status_label: status.label().to_string(),
-                    status_icon: status.icon().to_string(),
-                    should_blink: status.should_blink(),
-                    context_percentage: ctx_pct,
-                    cost_usd,
-                    duration_seconds,
-                    project_root,
-                    worktree_path,
-                    worktree_branch,
-                    parent_session_id: parent,
-                    child_session_ids: children,
-                    first_prompt,
-                    ..Default::default()
-                };
-                // Default empty strings round-trip fine, but make sure the
-                // formatted timestamps aren't pathological.
-                view.started_at = "1970-01-01T00:00:00+00:00".to_string();
-                view.last_activity = "1970-01-01T00:00:00+00:00".to_string();
-                view
             },
         )
 }
