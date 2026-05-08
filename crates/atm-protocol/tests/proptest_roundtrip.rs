@@ -74,19 +74,28 @@ fn arb_tricky_string() -> impl Strategy<Value = String> {
 
 /// Bounded f64 strategy.
 ///
-/// We deliberately stay away from subnormal / extreme-magnitude floats:
+/// We deliberately stay away from subnormal / very-small-magnitude floats:
 /// `serde_json`'s number formatting is not always 1-ULP exact for those
 /// (an upstream limitation, not a protocol concern). Realistic protocol
 /// f64s — cost in USD, context percentage, duration in seconds — sit
-/// comfortably inside `±1e12`, so this range is the protocol-meaningful
+/// comfortably inside `±[1e-12, 1e12]`, so that's the protocol-meaningful
 /// domain for round-trip checking.
+///
+/// Note that we have to bound the magnitude on *both* ends. A single
+/// `-1e12..1e12` range still includes arbitrarily tiny magnitudes
+/// (e.g. `1e-200`), which is exactly where serde_json's number formatting
+/// drifts. Generating zero explicitly and requiring `|f| ∈ [1e-12, 1e12]`
+/// keeps the test stable instead of flaky.
 fn arb_realistic_f64() -> impl Strategy<Value = f64> {
     prop_oneof![
         Just(0.0_f64),
         Just(-0.0_f64),
         Just(1.0_f64),
         Just(-1.0_f64),
-        -1.0e12_f64..1.0e12_f64,
+        // Positive magnitudes
+        1.0e-12_f64..1.0e12_f64,
+        // Negative magnitudes
+        -1.0e12_f64..-1.0e-12_f64,
     ]
 }
 
