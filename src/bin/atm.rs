@@ -793,8 +793,15 @@ async fn cmd_spawn(
     // here, and integration tests use it to inject a fixture binary by
     // absolute path (bypassing PATH lookup, which interactive shell
     // init can clobber).
+    //
+    // Shell-quote the command path itself: it gets concatenated into a
+    // string that the pane's shell parses, so spaces or special chars
+    // in (say) `/Applications/Claude Code.app/Contents/MacOS/claude`
+    // would otherwise re-tokenize. Single-quoting `claude` (the default)
+    // is harmless — PATH lookup is unaffected by quoting.
     let base_cmd = std::env::var("ATM_SPAWN_COMMAND").unwrap_or_else(|_| "claude".to_string());
-    let mut claude_cmd = base_cmd;
+    let escaped_base = base_cmd.replace('\'', "'\\''");
+    let mut claude_cmd = format!("'{escaped_base}'");
     if let Some(ref m) = model {
         claude_cmd.push_str(&format!(" --model {m}"));
     }

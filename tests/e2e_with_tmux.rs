@@ -241,24 +241,31 @@ struct Daemon {
     child: Option<Child>,
     socket_path: PathBuf,
     state_dir: PathBuf,
+    /// Path to the file capturing daemon stdout+stderr. Surfaced on
+    /// failure so a "socket didn't appear" panic includes actual evidence.
+    log_path: PathBuf,
     _state_dir_guard: TempDir,
     _socket_dir_guard: TempDir,
 }
 
 impl Daemon {
-    fn spawn(binary: &Path) -> Self {
+    async fn spawn(binary: &Path) -> Self {
         let socket_dir_guard = tempfile::tempdir().expect("create socket tempdir");
         let state_dir_guard = tempfile::tempdir().expect("create state tempdir");
         let socket_path = socket_dir_guard.path().join("atmd.sock");
         let state_dir = state_dir_guard.path().to_path_buf();
+        let log_path = state_dir_guard.path().join("atmd.log");
+
+        let log_file = std::fs::File::create(&log_path).expect("create atmd log file");
+        let log_clone = log_file.try_clone().expect("clone atmd log file");
 
         let child = Command::new(binary)
             .arg("start")
             .env("ATM_SOCKET", &socket_path)
             .env("XDG_STATE_HOME", &state_dir)
             .env("RUST_LOG", "warn")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(log_file)
+            .stderr(log_clone)
             .spawn()
             .expect("spawn atmd child");
 
@@ -266,26 +273,33 @@ impl Daemon {
             child: Some(child),
             socket_path,
             state_dir,
+            log_path,
             _state_dir_guard: state_dir_guard,
             _socket_dir_guard: socket_dir_guard,
         };
 
-        daemon.wait_for_socket();
+        daemon.wait_for_socket().await;
         daemon
     }
 
-    fn wait_for_socket(&self) {
+    async fn wait_for_socket(&self) {
         let start = Instant::now();
         while start.elapsed() < SOCKET_WAIT_TIMEOUT {
             if self.socket_path.exists() {
                 return;
             }
-            std::thread::sleep(SOCKET_POLL_INTERVAL);
+            tokio::time::sleep(SOCKET_POLL_INTERVAL).await;
         }
+        let log = std::fs::read_to_string(&self.log_path).unwrap_or_default();
         panic!(
-            "atmd socket {} did not appear within {:?}",
+            "atmd socket {} did not appear within {:?}\n--- atmd log ---\n{}",
             self.socket_path.display(),
-            SOCKET_WAIT_TIMEOUT
+            SOCKET_WAIT_TIMEOUT,
+            if log.is_empty() {
+                "(empty)".to_string()
+            } else {
+                log
+            }
         );
     }
 }
@@ -366,7 +380,7 @@ async fn atm_atmd_tmux_end_to_end() {
     // Daemon comes up first so the tmux server's env can carry ATM_SOCKET
     // straight into any panes it births. Scenario 4's shim reads it from
     // there to find the daemon socket.
-    let daemon = Daemon::spawn(&atmd_path);
+    let daemon = Daemon::spawn(&atmd_path).await;
 
     // Stage the `claude` shim. We invoke it by absolute path via
     // ATM_SPAWN_COMMAND, so we don't need to fight the user's shell init
@@ -445,7 +459,7 @@ async fn atm_atmd_tmux_end_to_end() {
         if Instant::now() >= deadline {
             break false;
         }
-        std::thread::sleep(SESSION_POLL_INTERVAL);
+        tokio::time::sleep(SESSION_POLL_INTERVAL).await;
     };
     assert!(
         found,
@@ -552,9 +566,12 @@ async fn atm_atmd_tmux_end_to_end() {
     // Scenario 4: real `atm spawn` driving the isolated tmux server, with
     // a Python `claude` shim registering the new session back to atmd.
     // ====================================================================
+    // Wrapped in a labeled block so a missing python3 only skips this
+    // scenario; scenario 5 (which doesn't need python) still runs.
+    'scenario_4: {
     if python3_on_path().is_none() {
-        eprintln!("SKIP scenario 4: python3 not on PATH");
-        return;
+        eprintln!("SKIP scenario 4: python3 not on PATH (scenario 5 still runs)");
+        break 'scenario_4;
     }
 
     let panes_pre_spawn = tmux.list_panes().await.expect("list panes (pre-spawn)");
@@ -686,6 +703,7 @@ async fn atm_atmd_tmux_end_to_end() {
 
     // RAII: tmux server killed by PrivateTmux::drop (which also reaps the
     // shim's pane), daemon killed by Daemon::drop, shim_dir_guard cleaned up.
+    } // end 'scenario_4
 
     // ====================================================================
     // Scenario 5: real `atm workspace attach` against an isolated server

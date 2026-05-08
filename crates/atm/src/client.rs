@@ -558,12 +558,17 @@ mod tests {
 
     #[test]
     fn test_daemon_config_default() {
-        // Use `resolve_socket_path()` rather than the literal "/tmp/atm.sock"
-        // so this test stays correct if ATM_SOCKET is set in the dev shell.
-        // The env-var override is exercised end-to-end by the e2e harness.
+        // Branch on the env var so the assertion checks a concrete value
+        // either way, instead of tautologically mirroring the impl. The
+        // env-var override is also exercised end-to-end by the e2e
+        // harness.
         let config = DaemonConfig::default();
 
-        assert_eq!(config.socket_path, resolve_socket_path());
+        let expected_socket = match std::env::var("ATM_SOCKET") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => PathBuf::from(DEFAULT_SOCKET_PATH),
+        };
+        assert_eq!(config.socket_path, expected_socket);
         assert_eq!(config.retry_initial_delay, Duration::from_secs(1));
         assert_eq!(config.retry_max_delay, Duration::from_secs(30));
         assert!((config.retry_multiplier - 2.0).abs() < f64::EPSILON);
