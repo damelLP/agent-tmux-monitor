@@ -229,6 +229,86 @@ fn session_list_multi_project_with_worktrees() {
     insta::assert_debug_snapshot!(buf);
 }
 
+#[test]
+fn session_list_collapsed_with_attention_count() {
+    // Collapses all groups so the project row shows ▸ icon plus the
+    // agent count badge "(2)" plus the bubbled-up attention "!" marker —
+    // a combination that doesn't appear in any expanded-tree snapshot.
+    let mut app = App::new();
+    app.state = AppState::Connected;
+    app.blink_visible = true;
+    app.update_sessions(vec![
+        make_session(
+            "wrk00001-aaaa-bbbb-cccc-000000000001",
+            "/home/dev/project-alpha",
+            "main",
+            "Opus 4.5",
+            SessionStatus::Working,
+            "working",
+            45.0,
+            0.50,
+            "2026-01-15T10:05:00Z",
+        ),
+        make_session(
+            "att00002-aaaa-bbbb-cccc-000000000002",
+            "/home/dev/project-alpha",
+            "main",
+            "Opus 4.5",
+            SessionStatus::AttentionNeeded,
+            "attention",
+            88.0,
+            1.00,
+            "2026-01-15T10:00:00Z",
+        ),
+    ]);
+    app.collapse_all();
+
+    let buf = render_buffer(40, 6, |frame, area| {
+        render_session_list(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+#[test]
+fn session_list_subagent_nesting() {
+    // Parent agent with one nested subagent. Subagents are linked via
+    // parent_session_id / child_session_ids and render at depth+1 under
+    // their parent in the flattened tree.
+    let mut parent = make_session(
+        "parent00-aaaa-bbbb-cccc-000000000001",
+        "/home/dev/project-alpha",
+        "main",
+        "Opus 4.5",
+        SessionStatus::Working,
+        "working",
+        40.0,
+        0.30,
+        "2026-01-15T10:05:00Z",
+    );
+    let mut child = make_session(
+        "childsub-aaaa-bbbb-cccc-000000000002",
+        "/home/dev/project-alpha",
+        "main",
+        "Sonnet 4.5",
+        SessionStatus::Working,
+        "working",
+        15.0,
+        0.05,
+        "2026-01-15T10:06:00Z",
+    );
+    child.parent_session_id = Some(parent.id.clone());
+    parent.child_session_ids = vec![child.id.clone()];
+
+    let mut app = App::new();
+    app.state = AppState::Connected;
+    app.update_sessions(vec![parent, child]);
+
+    let buf = render_buffer(45, 8, |frame, area| {
+        render_session_list(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
 // ---- Split layout: detail_panel -------------------------------------------
 
 #[test]
