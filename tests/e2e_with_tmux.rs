@@ -1,6 +1,6 @@
 //! End-to-end harness exercising real binaries against a real tmux server.
 //!
-//! Three scenarios are covered:
+//! Four scenarios are covered:
 //!
 //! 1. **Protocol-level e2e**: spawn `atmd` as a child, hand-roll a client over
 //!    a Unix socket, register a session via `HookEvent`, observe via
@@ -15,18 +15,25 @@
 //!    `atm_tmux::RealTmuxClient::with_socket(label)` against the private
 //!    tmux server we spun up. Splits a pane, sends keys, captures output.
 //!
+//! 4. **`atm spawn` with a `claude` fixture**: run the actual `atm spawn`
+//!    subcommand against our isolated tmux server (via `ATM_TMUX_SOCKET`),
+//!    using a Python shim named `claude` placed first on PATH. The shim
+//!    connects to atmd over its socket, sends a `UserPromptSubmit` hook
+//!    event carrying `$TMUX_PANE`, and sleeps to keep the pane alive
+//!    (atmd's stale-session reaper runs every 2s). The test then polls
+//!    `atm list --format json` until a session whose `tmux_pane` matches
+//!    the pane atm spawn created shows up. This validates the entire
+//!    spawn → tmux split → hook event → registry update loop.
+//!
 //! What's still **not** covered (and why):
 //!
-//! - `atm spawn` end-to-end requires `claude` on PATH and meaningful TMUX
-//!   env state. The pane would be created, but the agent it tries to run
-//!   would never register with atmd. Stubbing that out reliably is a
-//!   bigger lift than this harness aims for.
-//! - `atm workspace attach` requires the test process to behave as if it
-//!   were already inside a tmux session — touchable, but a separate
-//!   concern from the protocol/library coverage above.
+//! - `atm workspace attach`: requires hijacking the controlling terminal's
+//!    tmux state in non-trivial ways. Out of reach without an attach
+//!    smoke-test mode or major fixture work.
 //!
 //! The test skips cleanly (printed message, returns Ok) when `tmux` is
-//! absent from PATH or the binaries weren't built.
+//! absent from PATH, when the binaries weren't built, or — for scenario
+//! 4 only — when `python3` is unavailable.
 //!
 //! Per CLAUDE.md, tests are an explicit `unwrap()`/`expect()`-allowed zone.
 
@@ -66,23 +73,119 @@ fn atm_binary() -> Option<PathBuf> {
     option_env!("CARGO_BIN_EXE_atm").map(PathBuf::from)
 }
 
+/// Returns `Some(path)` if `python3` resolves on PATH, `None` otherwise.
+fn python3_on_path() -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        let candidate = dir.join("python3");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Writes a Python `claude` shim into `dir` and makes it executable.
+///
+/// The shim impersonates Claude Code's startup just enough to register a
+/// session with atmd and stay alive: connect to `$ATM_SOCKET`, send
+/// `Connect`, then send a `UserPromptSubmit` `HookEvent` carrying our PID
+/// and `$TMUX_PANE`, then sleep. Any error is logged to stderr and the
+/// shim exits non-zero so tmux's pane keeps the error visible for
+/// debugging.
+fn write_claude_shim(dir: &Path) -> PathBuf {
+    let path = dir.join("claude");
+    let body = r#"#!/usr/bin/env python3
+import json, os, socket, sys, time, uuid
+
+socket_path = os.environ.get("ATM_SOCKET", "/tmp/atm.sock")
+pane = os.environ.get("TMUX_PANE", "")
+session_id = "fixture-" + uuid.uuid4().hex[:12]
+
+try:
+    s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    s.connect(socket_path)
+    f = s.makefile("rwb", buffering=0)
+
+    def send(obj):
+        f.write((json.dumps(obj) + "\n").encode())
+        f.flush()
+
+    def recv():
+        line = f.readline()
+        if not line:
+            raise RuntimeError("daemon closed connection")
+        return json.loads(line.decode())
+
+    send({
+        "protocol_version": {"major": 1, "minor": 0},
+        "type": "connect",
+        "client_id": "claude-fixture",
+    })
+    msg = recv()
+    if msg.get("type") != "connected":
+        raise RuntimeError("unexpected handshake response: " + json.dumps(msg))
+
+    send({
+        "protocol_version": {"major": 1, "minor": 0},
+        "type": "hook_event",
+        "data": {
+            "session_id": session_id,
+            "hook_event_name": "UserPromptSubmit",
+            "pid": os.getpid(),
+            "tmux_pane": pane,
+            "prompt": "fixture probe",
+        },
+    })
+
+    # Stay alive — atmd's stale-session reaper runs every 2s and would
+    # remove this session if the registered PID exited.
+    print("[claude-fixture] registered session " + session_id + " for pane " + pane, flush=True)
+    time.sleep(60)
+except Exception as e:
+    print("[claude-fixture] error: " + repr(e), file=sys.stderr, flush=True)
+    sys.exit(1)
+"#;
+    std::fs::write(&path, body).expect("write claude shim");
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(&path).expect("stat shim").permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).expect("chmod shim");
+    path
+}
+
+
 /// Owns a private tmux server scoped to this test (tmux `-L <socket>`).
 ///
 /// We pass this label to `RealTmuxClient::with_socket(...)` so the project's
 /// own tmux library code talks to *this* server, not the developer's default.
+///
+/// Env vars passed to `start_with_env(...)` propagate into the tmux server's
+/// process — and from there into the shells running in panes the server
+/// creates. That's the channel by which scenario 4's `claude` shim sees
+/// `ATM_SOCKET` and the shim directory on `PATH`.
 struct PrivateTmux {
     socket_label: String,
 }
 
 impl PrivateTmux {
-    fn start() -> Self {
+    fn start_with_env<I, K, V>(env: I) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
         let now_nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let socket_label = format!("atm-e2e-{}-{}", std::process::id(), now_nanos);
 
-        let status = Command::new("tmux")
+        let mut cmd = Command::new("tmux");
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        let status = cmd
             .args(["-L", &socket_label, "new-session", "-d", "-s", "probe"])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -236,8 +339,21 @@ async fn atm_atmd_tmux_end_to_end() {
         return;
     };
 
-    let tmux_server = PrivateTmux::start();
+    // Daemon comes up first so the tmux server's env can carry ATM_SOCKET
+    // straight into any panes it births. Scenario 4's shim reads it from
+    // there to find the daemon socket.
     let daemon = Daemon::spawn(&atmd_path);
+
+    // Stage the `claude` shim. We invoke it by absolute path via
+    // ATM_SPAWN_COMMAND, so we don't need to fight the user's shell init
+    // for PATH precedence.
+    let shim_dir_guard = tempfile::tempdir().expect("create shim tempdir");
+    let shim_path = write_claude_shim(shim_dir_guard.path());
+
+    let tmux_server = PrivateTmux::start_with_env([(
+        "ATM_SOCKET",
+        daemon.socket_path.as_os_str(),
+    )]);
 
     // ====================================================================
     // Scenario 1: protocol-level e2e via hand-rolled client
@@ -408,5 +524,142 @@ async fn atm_atmd_tmux_end_to_end() {
         "split-window should add exactly one pane to the private server"
     );
 
-    // RAII: tmux server killed by PrivateTmux::drop, daemon killed by Daemon::drop.
+    // ====================================================================
+    // Scenario 4: real `atm spawn` driving the isolated tmux server, with
+    // a Python `claude` shim registering the new session back to atmd.
+    // ====================================================================
+    if python3_on_path().is_none() {
+        eprintln!("SKIP scenario 4: python3 not on PATH");
+        return;
+    }
+
+    let panes_pre_spawn = tmux.list_panes().await.expect("list panes (pre-spawn)");
+    let probe_pane_pre_spawn = panes_pre_spawn
+        .iter()
+        .find(|p| p.session_name == "probe")
+        .expect("probe pane present")
+        .pane_id
+        .clone();
+
+    let spawn_output = Command::new(&atm_path)
+        .args([
+            "spawn",
+            "--target-pane",
+            &probe_pane_pre_spawn,
+            "--direction",
+            "below",
+            "--size",
+            "20%",
+        ])
+        // is_in_tmux() just checks for the env var; any value passes.
+        .env("TMUX", "atm-e2e-fixture-no-real-tmux-here")
+        // Redirect every tmux invocation atm spawn makes onto our server.
+        .env("ATM_TMUX_SOCKET", tmux_server.label())
+        // Override the hardcoded "claude" command with our shim, by
+        // absolute path so shell PATH precedence is irrelevant.
+        .env("ATM_SPAWN_COMMAND", &shim_path)
+        // The shim talks back to *our* daemon over this socket.
+        .env("ATM_SOCKET", &daemon.socket_path)
+        // ensure_daemon_running reads PID file under XDG_STATE_HOME.
+        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .output()
+        .expect("run atm spawn");
+
+    assert!(
+        spawn_output.status.success(),
+        "atm spawn exited with {:?}\nstdout: {}\nstderr: {}",
+        spawn_output.status.code(),
+        String::from_utf8_lossy(&spawn_output.stdout),
+        String::from_utf8_lossy(&spawn_output.stderr)
+    );
+
+    // Identify the pane atm spawn just created on our server.
+    let panes_post_spawn = tmux.list_panes().await.expect("list panes (post-spawn)");
+    let new_panes: Vec<_> = panes_post_spawn
+        .iter()
+        .filter(|p| !panes_pre_spawn.iter().any(|q| q.pane_id == p.pane_id))
+        .collect();
+    assert_eq!(
+        new_panes.len(),
+        1,
+        "atm spawn should create exactly one new pane; got {} ({:?})",
+        new_panes.len(),
+        new_panes.iter().map(|p| &p.pane_id).collect::<Vec<_>>()
+    );
+    let spawned_pane = new_panes[0].pane_id.clone();
+
+    // Poll `atm list --format json` until our fixture-minted session shows
+    // up. We can't filter on tmux_pane alone: pane IDs (`%N`) aren't unique
+    // across tmux servers, and scenario 1's `Discover` may have surfaced
+    // user-side claude processes whose tmux_pane (resolved against the
+    // *default* server) coincidentally collides with our spawned pane in
+    // the *private* server. The "fixture-" prefix is uniquely ours, so we
+    // gate on that AND verify the tmux_pane match for safety.
+    //
+    // Generous deadline because the shim has to: (a) wait for tmux's
+    // send-keys to land, (b) start the Python interpreter, (c) connect to
+    // atmd, (d) hand off the hook event, (e) atmd has to apply it.
+    let spawn_deadline = Instant::now() + Duration::from_secs(10);
+    let mut fixture_session: Option<Value> = None;
+    while Instant::now() < spawn_deadline {
+        let list_output = Command::new(&atm_path)
+            .args(["list", "--format", "json"])
+            .env("ATM_SOCKET", &daemon.socket_path)
+            .env("XDG_STATE_HOME", &daemon.state_dir)
+            .output()
+            .expect("run atm list");
+
+        if list_output.status.success() {
+            if let Ok(parsed) = serde_json::from_slice::<Value>(&list_output.stdout) {
+                if let Some(arr) = parsed.as_array() {
+                    if let Some(s) = arr.iter().find(|s| {
+                        s.get("id")
+                            .and_then(Value::as_str)
+                            .map_or(false, |id| id.starts_with("fixture-"))
+                    }) {
+                        fixture_session = Some(s.clone());
+                        break;
+                    }
+                }
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(150)).await;
+    }
+
+    let session = match fixture_session {
+        Some(s) => s,
+        None => {
+            // Snapshot what's in the spawned pane so the failure is
+            // diagnosable instead of mysterious.
+            let pane_dump = tmux
+                .capture_pane(&spawned_pane)
+                .await
+                .unwrap_or_else(|e| vec![format!("(capture-pane failed: {e})")]);
+            panic!(
+                "no session with id starting with 'fixture-' appeared within 10s.\n\
+                 atm spawn stdout: {}\n\
+                 atm spawn stderr: {}\n\
+                 spawned pane ({spawned_pane}) contents:\n{}",
+                String::from_utf8_lossy(&spawn_output.stdout),
+                String::from_utf8_lossy(&spawn_output.stderr),
+                pane_dump.join("\n")
+            );
+        }
+    };
+
+    // The shim records `$TMUX_PANE`, which inside the spawned pane equals
+    // the id atm spawn assigned it. This is what closes the loop: spawn
+    // created the pane, the pane ran the shim, the shim told atmd, atmd
+    // remembered the pane id we know — full e2e for the spawn flow.
+    let registered_pane = session
+        .get("tmux_pane")
+        .and_then(Value::as_str)
+        .expect("fixture session should carry tmux_pane");
+    assert_eq!(
+        registered_pane, spawned_pane,
+        "fixture session's tmux_pane should match the pane atm spawn created"
+    );
+
+    // RAII: tmux server killed by PrivateTmux::drop (which also reaps the
+    // shim's pane), daemon killed by Daemon::drop, shim_dir_guard cleaned up.
 }

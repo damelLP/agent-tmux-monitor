@@ -20,10 +20,23 @@ pub struct RealTmuxClient {
     socket_name: Option<String>,
 }
 
+/// Environment variable read by [`RealTmuxClient::new`] to pick a non-default
+/// tmux socket label. Mirrors `ATM_SOCKET` for the daemon side: lets test
+/// harnesses redirect every tmux call an `atm` process makes to a private
+/// `tmux -L <label>` server without modifying call sites.
+pub const TMUX_SOCKET_ENV: &str = "ATM_TMUX_SOCKET";
+
 impl RealTmuxClient {
-    /// Creates a new client that uses the default tmux server.
+    /// Creates a new client.
+    ///
+    /// If the [`TMUX_SOCKET_ENV`] environment variable is set, the client
+    /// targets that tmux socket label (`tmux -L <label>`). Otherwise it
+    /// uses the default tmux server.
     pub fn new() -> Self {
-        Self::default()
+        match std::env::var(TMUX_SOCKET_ENV) {
+            Ok(label) if !label.is_empty() => Self::with_socket(label),
+            _ => Self::default(),
+        }
     }
 
     /// Creates a client targeting a specific tmux server socket.

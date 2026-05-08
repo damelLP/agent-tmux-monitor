@@ -788,8 +788,13 @@ async fn cmd_spawn(
 
     let client = RealTmuxClient::new();
 
-    // Build the claude command
-    let mut claude_cmd = String::from("claude");
+    // Build the claude command. `ATM_SPAWN_COMMAND` is an escape hatch:
+    // users running claude under a wrapper or alternate path can point
+    // here, and integration tests use it to inject a fixture binary by
+    // absolute path (bypassing PATH lookup, which interactive shell
+    // init can clobber).
+    let base_cmd = std::env::var("ATM_SPAWN_COMMAND").unwrap_or_else(|_| "claude".to_string());
+    let mut claude_cmd = base_cmd;
     if let Some(ref m) = model {
         claude_cmd.push_str(&format!(" --model {m}"));
     }
