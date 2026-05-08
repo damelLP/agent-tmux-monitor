@@ -1446,7 +1446,16 @@ fn install_new_window_hook(socket: &Option<String>, session_name: &str) -> Resul
 }
 
 /// Exec into `tmux attach-session` (replaces the current process on Unix).
+///
+/// Honors `ATM_NO_ATTACH=1`: skips the attach and returns Ok(()), which
+/// lets integration tests drive the workspace setup steps without
+/// blocking on a real terminal. Undocumented user-facing because the
+/// only sane reason to skip the attach is testing.
 fn exec_attach(socket: &Option<String>, session_name: &str) -> Result<()> {
+    if std::env::var("ATM_NO_ATTACH").is_ok_and(|v| v == "1") {
+        return Ok(());
+    }
+
     let mut cmd = std::process::Command::new("tmux");
     if let Some(ref s) = socket {
         cmd.arg("-L").arg(s);
@@ -1574,6 +1583,11 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
 
     // 9. Install resize hooks + prefix-R keybinding
     install_resize_hooks(&socket_name, &session_name)?;
+    // NOTE: divergence with `cmd_workspace_attach`, which also calls
+    // `install_new_window_hook` here. As written, a workspace created via
+    // `create` does not get sidebars injected into windows opened later
+    // (e.g., via prefix-c). Likely an oversight — both flows produce the
+    // same long-lived session and should hook the same events.
 
     // 10. Focus the agent pane and attach
     tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;

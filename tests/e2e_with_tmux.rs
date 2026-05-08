@@ -1,6 +1,6 @@
 //! End-to-end harness exercising real binaries against a real tmux server.
 //!
-//! Four scenarios are covered:
+//! Five scenarios are covered:
 //!
 //! 1. **Protocol-level e2e**: spawn `atmd` as a child, hand-roll a client over
 //!    a Unix socket, register a session via `HookEvent`, observe via
@@ -25,11 +25,21 @@
 //!    the pane atm spawn created shows up. This validates the entire
 //!    spawn → tmux split → hook event → registry update loop.
 //!
-//! What's still **not** covered (and why):
+//! 5. **`atm workspace attach`**: builds an isolated tmux server with a
+//!    multi-window session that simulates "the user's existing
+//!    workspace," runs `atm workspace attach` against it (with
+//!    `ATM_NO_ATTACH=1` to skip the blocking `exec_attach` step), and
+//!    asserts every window now has a `@atm-sidebar=1` pane and the
+//!    expected hooks are installed. Also asserts an idempotency
+//!    property: a second invocation does NOT double up sidebars.
 //!
-//! - `atm workspace attach`: requires hijacking the controlling terminal's
-//!    tmux state in non-trivial ways. Out of reach without an attach
-//!    smoke-test mode or major fixture work.
+//! NOTE on attach vs. create divergence: `cmd_workspace_attach` installs
+//! both `after-resize-window` AND `after-new-window` hooks, so newly
+//! opened windows get a sidebar automatically. `cmd_workspace` (create)
+//! installs only the resize hook — a workspace built with `create` and
+//! then `prefix-c`-extended doesn't get sidebars in those new windows.
+//! Likely an oversight; this fixture verifies the attach side and
+//! leaves a TODO comment in `cmd_workspace` for the symmetry fix.
 //!
 //! The test skips cleanly (printed message, returns Ok) when `tmux` is
 //! absent from PATH, when the binaries weren't built, or — for scenario
@@ -180,20 +190,34 @@ impl PrivateTmux {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let socket_label = format!("atm-e2e-{}-{}", std::process::id(), now_nanos);
+        Self::start_with_label_session_env(&socket_label, "probe", env)
+    }
 
+    fn start_with_label_session_env<I, K, V>(
+        socket_label: &str,
+        session_name: &str,
+        env: I,
+    ) -> Self
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<std::ffi::OsStr>,
+        V: AsRef<std::ffi::OsStr>,
+    {
         let mut cmd = Command::new("tmux");
         for (k, v) in env {
             cmd.env(k, v);
         }
         let status = cmd
-            .args(["-L", &socket_label, "new-session", "-d", "-s", "probe"])
+            .args(["-L", socket_label, "new-session", "-d", "-s", session_name])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
             .expect("spawn tmux new-session");
         assert!(status.success(), "tmux new-session failed");
 
-        Self { socket_label }
+        Self {
+            socket_label: socket_label.to_string(),
+        }
     }
 
     fn label(&self) -> &str {
@@ -662,4 +686,216 @@ async fn atm_atmd_tmux_end_to_end() {
 
     // RAII: tmux server killed by PrivateTmux::drop (which also reaps the
     // shim's pane), daemon killed by Daemon::drop, shim_dir_guard cleaned up.
+
+    // ====================================================================
+    // Scenario 5: real `atm workspace attach` against an isolated server
+    // ====================================================================
+    // We run on a second tmux server because attach's `--isolate` flag
+    // hardcodes the socket label as `atm-<sessname>`. Sharing the
+    // primary scenario-1-3-4 server would require renaming or making
+    // the production code more flexible — neither is in scope.
+    //
+    // Hooks/scripts go to a sandboxed `data_local_dir` (XDG_DATA_HOME),
+    // so the test never writes to `~/.local/share/atm/`.
+    let attach_session_name = format!("jghatt{}", std::process::id());
+    let attach_socket_label = format!("atm-{attach_session_name}");
+    let attach_data_dir = tempfile::tempdir().expect("create attach data tempdir");
+
+    let attach_tmux = PrivateTmux::start_with_label_session_env(
+        &attach_socket_label,
+        &attach_session_name,
+        std::iter::empty::<(&str, &str)>(),
+    );
+
+    // Build a multi-window session — the interesting case for attach,
+    // since per-window sidebar injection is the loop attach owns.
+    let tmux_attach_client =
+        RealTmuxClient::with_socket(attach_tmux.label().to_string());
+    Command::new("tmux")
+        .args([
+            "-L",
+            attach_tmux.label(),
+            "new-window",
+            "-t",
+            &attach_session_name,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("create second window");
+    Command::new("tmux")
+        .args([
+            "-L",
+            attach_tmux.label(),
+            "new-window",
+            "-t",
+            &attach_session_name,
+        ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .expect("create third window");
+
+    let pre_attach_panes = tmux_attach_client
+        .list_panes()
+        .await
+        .expect("list panes pre-attach");
+    let pre_attach_window_count = pre_attach_panes
+        .iter()
+        .map(|p| p.window_index)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
+    assert_eq!(
+        pre_attach_window_count, 3,
+        "expected 3 windows in the simulated workspace, got {pre_attach_window_count}"
+    );
+
+    let attach_output = Command::new(&atm_path)
+        .args([
+            "workspace",
+            "attach",
+            &attach_session_name,
+            "--isolate",
+        ])
+        .env("ATM_NO_ATTACH", "1")
+        .env("XDG_DATA_HOME", attach_data_dir.path())
+        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .env("ATM_SOCKET", &daemon.socket_path)
+        .output()
+        .expect("run atm workspace attach");
+    assert!(
+        attach_output.status.success(),
+        "atm workspace attach failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&attach_output.stdout),
+        String::from_utf8_lossy(&attach_output.stderr)
+    );
+
+    // Each window should now contain a pane tagged `@atm-sidebar=1`.
+    let post_attach_panes = list_panes_with_sidebar_marker(attach_tmux.label())
+        .expect("list panes with sidebar marker post-attach");
+
+    let mut windows_with_sidebar: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
+    for entry in &post_attach_panes {
+        if entry.is_sidebar {
+            *windows_with_sidebar.entry(entry.window_id.clone()).or_insert(0) += 1;
+        }
+    }
+
+    assert_eq!(
+        windows_with_sidebar.len(),
+        3,
+        "every one of the 3 windows should have an @atm-sidebar pane; got {} \
+         (full pane list: {:?})",
+        windows_with_sidebar.len(),
+        post_attach_panes
+    );
+    for (window, count) in &windows_with_sidebar {
+        assert_eq!(
+            *count, 1,
+            "window {window} should have exactly one sidebar pane, got {count}"
+        );
+    }
+
+    // Verify both hooks attach is responsible for are installed on the
+    // session (the divergence with create lives here: create installs
+    // only `after-resize-window`).
+    let installed_hooks = tmux_run_capture(
+        attach_tmux.label(),
+        &["show-hooks", "-t", &attach_session_name],
+    )
+    .expect("show-hooks");
+    assert!(
+        installed_hooks.contains("after-resize-window"),
+        "after-resize-window hook should be installed; got: {installed_hooks}"
+    );
+    assert!(
+        installed_hooks.contains("after-new-window"),
+        "after-new-window hook (only attach installs this; see divergence \
+         note in cmd_workspace) should be present; got: {installed_hooks}"
+    );
+
+    // Idempotency: running attach a second time must NOT add another
+    // sidebar to any window. The production code keys off `@atm-sidebar`.
+    let attach_output_2 = Command::new(&atm_path)
+        .args([
+            "workspace",
+            "attach",
+            &attach_session_name,
+            "--isolate",
+        ])
+        .env("ATM_NO_ATTACH", "1")
+        .env("XDG_DATA_HOME", attach_data_dir.path())
+        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .env("ATM_SOCKET", &daemon.socket_path)
+        .output()
+        .expect("run atm workspace attach (second time)");
+    assert!(
+        attach_output_2.status.success(),
+        "second attach failed: stderr={}",
+        String::from_utf8_lossy(&attach_output_2.stderr)
+    );
+
+    let final_panes = list_panes_with_sidebar_marker(attach_tmux.label())
+        .expect("list panes after second attach");
+    let final_sidebar_count = final_panes.iter().filter(|p| p.is_sidebar).count();
+    assert_eq!(
+        final_sidebar_count, 3,
+        "second attach should be a no-op for already-injected windows, \
+         but ended up with {final_sidebar_count} sidebars"
+    );
+}
+
+#[derive(Debug)]
+struct PaneEntry {
+    window_id: String,
+    #[allow(dead_code)]
+    pane_id: String,
+    is_sidebar: bool,
+}
+
+/// Lists every pane on the given tmux server with its window id and
+/// `@atm-sidebar` option value. Avoids `RealTmuxClient::list_panes`
+/// because we need the option, not just the standard fields.
+fn list_panes_with_sidebar_marker(socket_label: &str) -> Option<Vec<PaneEntry>> {
+    let output = Command::new("tmux")
+        .args([
+            "-L",
+            socket_label,
+            "list-panes",
+            "-a",
+            "-F",
+            "#{window_id}|#{pane_id}|#{@atm-sidebar}",
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let mut entries = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let parts: Vec<&str> = line.split('|').collect();
+        if let (Some(window_id), Some(pane_id)) = (parts.first(), parts.get(1)) {
+            let is_sidebar = parts.get(2).map_or(false, |s| *s == "1");
+            entries.push(PaneEntry {
+                window_id: window_id.to_string(),
+                pane_id: pane_id.to_string(),
+                is_sidebar,
+            });
+        }
+    }
+    Some(entries)
+}
+
+/// Tiny `tmux -L <label> ...` helper for scenario 5's hook-inspection
+/// queries. Returns stdout on success.
+fn tmux_run_capture(socket_label: &str, args: &[&str]) -> Option<String> {
+    let mut cmd = Command::new("tmux");
+    cmd.args(["-L", socket_label]);
+    cmd.args(args);
+    let output = cmd.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
