@@ -22,26 +22,47 @@ use atm_tui::ui::{
 };
 use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
-/// Serializes tests that mutate process-wide environment variables.
-/// Multiple integration tests share one binary and run in parallel by default;
-/// without this lock, env mutation in one test races with reads in another.
+/// Serializes the `#[test]` functions in this binary that mutate
+/// process-wide environment variables. Cargo compiles `tests/ui_snapshots.rs`
+/// into its own binary, but the `#[test]`s inside it run concurrently by
+/// default — without this lock, env mutation in one test would race with
+/// `tmux::is_in_tmux()` reads in another.
+///
+/// The mutex is recovered from poisoning in `with_tmux` so a single panicking
+/// test doesn't cascade into spurious failures for the others.
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-/// Runs `f` with `TMUX` set to a fixed value, restoring the previous value after.
-/// Used for widgets whose output depends on `tmux::is_in_tmux()`.
+/// RAII guard that restores `TMUX` to its previous value when dropped.
+/// Drop runs even on panic, so the env state stays consistent across tests.
+struct TmuxEnvGuard {
+    prev: Option<String>,
+}
+
+impl Drop for TmuxEnvGuard {
+    fn drop(&mut self) {
+        match self.prev.take() {
+            Some(v) => std::env::set_var("TMUX", v),
+            None => std::env::remove_var("TMUX"),
+        }
+    }
+}
+
+/// Runs `f` with `TMUX` set to a fixed value, restoring the previous value
+/// afterward — even if `f` panics. Used for widgets whose output depends on
+/// `tmux::is_in_tmux()`.
 fn with_tmux<F, R>(f: F) -> R
 where
     F: FnOnce() -> R,
 {
-    let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-    let prev = std::env::var("TMUX").ok();
+    // Recover from poisoning: if a previous test panicked while holding the
+    // lock, its TmuxEnvGuard already restored TMUX on unwind, so the env
+    // state is consistent and we can safely proceed.
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = TmuxEnvGuard {
+        prev: std::env::var("TMUX").ok(),
+    };
     std::env::set_var("TMUX", "/tmp/snapshot-test");
-    let result = f();
-    match prev {
-        Some(v) => std::env::set_var("TMUX", v),
-        None => std::env::remove_var("TMUX"),
-    }
-    result
+    f()
 }
 
 /// Builds a fully-populated `SessionView` for snapshot fixtures.
@@ -407,10 +428,12 @@ fn footer_in_tmux() {
 
 #[test]
 fn help_popup_in_tmux() {
-    // Larger terminal so the centered popup (60% × 70%) is big enough
-    // to display every keybinding entry without clipping.
+    // Terminal sized so the centered popup (60% × 70% = 72×28) has a
+    // ~70-col inner content area — wide enough for the longest help line
+    // ("Enter       Jump to session (leaf) / toggle fold (group)") to
+    // render in full without clipping.
     let buf = with_tmux(|| {
-        render_buffer(100, 40, |frame, area| {
+        render_buffer(120, 40, |frame, area| {
             render_help_popup(frame, area);
         })
     });
