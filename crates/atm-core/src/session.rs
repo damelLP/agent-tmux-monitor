@@ -1,8 +1,7 @@
 //! Session domain entities and value objects.
 
 use crate::lifecycle::{LifecycleEvent, NeedsInputReason, NotificationKind};
-use crate::tool::Tool;
-use crate::{AgentType, ClaudeEventType, ContextUsage, Model, Money, TokenCount};
+use crate::{AgentType, ContextUsage, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -706,63 +705,6 @@ impl SessionDomain {
         cwd_changed
     }
 
-    /// Updates status based on a Claude raw hook event.
-    ///
-    /// Translates the Claude-specific event into a vendor-neutral
-    /// `LifecycleEvent` and dispatches to `apply_lifecycle_event`.
-    /// Prefer calling `apply_lifecycle_event` directly when the caller
-    /// already has a `LifecycleEvent` in hand.
-    pub fn apply_hook_event(&mut self, event_type: ClaudeEventType, tool_name: Option<&str>) {
-        let lifecycle = match event_type {
-            ClaudeEventType::PreToolUse => match tool_name {
-                Some(name) => {
-                    let tool = Tool::from(name);
-                    if tool.is_interactive() {
-                        LifecycleEvent::NeedsInput {
-                            reason: NeedsInputReason::InteractiveTool { tool },
-                        }
-                    } else {
-                        LifecycleEvent::ToolCallStart {
-                            name: tool,
-                            tool_use_id: None,
-                            input: None,
-                        }
-                    }
-                }
-                None => return,
-            },
-            ClaudeEventType::PostToolUse => LifecycleEvent::ToolCallEnd {
-                name: Tool::from(tool_name.unwrap_or("")),
-                tool_use_id: None,
-                is_error: false,
-            },
-            ClaudeEventType::PostToolUseFailure => LifecycleEvent::ToolCallEnd {
-                name: Tool::from(tool_name.unwrap_or("")),
-                tool_use_id: None,
-                is_error: true,
-            },
-            ClaudeEventType::UserPromptSubmit => LifecycleEvent::PromptSubmit { prompt: None },
-            ClaudeEventType::Stop => LifecycleEvent::WorkingEnd,
-            ClaudeEventType::SessionStart => LifecycleEvent::SessionStart { source: None },
-            ClaudeEventType::SessionEnd => LifecycleEvent::SessionEnd { reason: None },
-            ClaudeEventType::PreCompact => LifecycleEvent::ContextCompactStart { trigger: None },
-            ClaudeEventType::Setup => LifecycleEvent::Notification {
-                message: None,
-                kind: Some(NotificationKind::Setup),
-            },
-            ClaudeEventType::Notification => LifecycleEvent::Notification {
-                message: None,
-                kind: None,
-            },
-            ClaudeEventType::SubagentStart => LifecycleEvent::ChildSessionStart {
-                id: None,
-                role: None,
-            },
-            ClaudeEventType::SubagentStop => LifecycleEvent::ChildSessionEnd { id: None },
-        };
-        self.apply_lifecycle_event(&lifecycle);
-    }
-
     /// Updates status from a vendor-neutral lifecycle event.
     ///
     /// Single source of truth for session-state transitions. Every
@@ -1298,6 +1240,7 @@ fn format_duration(duration: chrono::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::Tool;
 
     /// Creates a test session with default values.
     fn create_test_session(id: &str) -> SessionDomain {
@@ -1436,12 +1379,14 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_hook_event_interactive_tool() {
+    fn lifecycle_needs_input_for_interactive_tool() {
         let mut session = create_test_session("test-interactive");
 
-        // PreToolUse with interactive tool → AttentionNeeded
-        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("AskUserQuestion"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::InteractiveTool {
+                tool: Tool::AskUserQuestion,
+            },
+        });
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
             session
@@ -1452,18 +1397,23 @@ mod tests {
             Some("AskUserQuestion")
         );
 
-        // PostToolUse → back to Working (thinking)
-        session.apply_hook_event(ClaudeEventType::PostToolUse, None);
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallEnd {
+            name: Tool::AskUserQuestion,
+            tool_use_id: None,
+            is_error: false,
+        });
         assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
-    fn test_apply_hook_event_enter_plan_mode() {
+    fn lifecycle_needs_input_for_enter_plan_mode() {
         let mut session = create_test_session("test-plan");
 
-        // EnterPlanMode is also interactive
-        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("EnterPlanMode"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::InteractiveTool {
+                tool: Tool::EnterPlanMode,
+            },
+        });
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
             session
@@ -1476,12 +1426,14 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_hook_event_standard_tool() {
+    fn lifecycle_tool_call_start_for_standard_tool() {
         let mut session = create_test_session("test-standard");
 
-        // PreToolUse with standard tool → Working
-        session.apply_hook_event(ClaudeEventType::PreToolUse, Some("Bash"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallStart {
+            name: Tool::Bash,
+            tool_use_id: None,
+            input: None,
+        });
         assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
             session
@@ -1492,34 +1444,35 @@ mod tests {
             Some("Bash")
         );
 
-        // PostToolUse → still Working (thinking)
-        session.apply_hook_event(ClaudeEventType::PostToolUse, Some("Bash"));
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallEnd {
+            name: Tool::Bash,
+            tool_use_id: None,
+            is_error: false,
+        });
         assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
-    fn test_apply_hook_event_none_tool_name() {
-        let mut session = create_test_session("test-none");
-        let original_status = session.status;
+    fn lifecycle_unknown_tool_lands_in_other_and_keeps_name() {
+        // The empty/unknown case used to be "standard tool with empty name".
+        // After typing, the same input becomes Tool::Other("") — the session
+        // still treats it as a working tool call without crashing on missing data.
+        let mut session = create_test_session("test-other");
 
-        // PreToolUse with None tool name should not change status
-        session.apply_hook_event(ClaudeEventType::PreToolUse, None);
-
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallStart {
+            name: Tool::Other("custom_pi_tool".into()),
+            tool_use_id: None,
+            input: None,
+        });
+        assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
-            session.status, original_status,
-            "PreToolUse with None tool_name should not change status"
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("custom_pi_tool")
         );
-    }
-
-    #[test]
-    fn test_apply_hook_event_empty_tool_name() {
-        let mut session = create_test_session("test-empty");
-
-        // Empty string tool name - should be treated as standard tool
-        // (is_interactive_tool returns false for empty strings)
-        session.apply_hook_event(ClaudeEventType::PreToolUse, Some(""));
-
-        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]

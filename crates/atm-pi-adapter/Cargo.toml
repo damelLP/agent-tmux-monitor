@@ -1,0 +1,15 @@
+[package]
+name = "atm-pi-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "pi adapter for ATM — translates pi (https://pi.dev) extension events into vendor-neutral LifecycleEvent"
+
+[dependencies]
+atm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }

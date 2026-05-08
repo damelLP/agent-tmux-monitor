@@ -128,6 +128,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "atm-claude-adapter"
+version = "0.2.2"
+dependencies = [
+ "atm-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "atm-core"
 version = "0.2.2"
 dependencies = [
@@ -139,6 +148,15 @@ dependencies = [
  "thiserror",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "atm-pi-adapter"
+version = "0.2.2"
+dependencies = [
+ "atm-core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -192,6 +210,7 @@ name = "atmd"
 version = "0.2.2"
 dependencies = [
  "anyhow",
+ "atm-claude-adapter",
  "atm-core",
  "atm-protocol",
  "chrono",

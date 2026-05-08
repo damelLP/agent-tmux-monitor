@@ -23,8 +23,9 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use atm_claude_adapter::RawHookEvent;
 use atm_core::SessionId;
-use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion, RawHookEvent};
+use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion};
 
 use crate::discovery::{DiscoveryResult, DiscoveryService};
 use crate::registry::{RegistryHandle, SessionEvent};
