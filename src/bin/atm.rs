@@ -668,7 +668,7 @@ fn create_log_file() -> Option<std::fs::File> {
 
 /// Fetches the current session list from the daemon via one-shot connection.
 async fn fetch_sessions() -> Result<Vec<SessionView>> {
-    let socket_path = PathBuf::from("/tmp/atm.sock");
+    let socket_path = atm_tui::client::resolve_socket_path();
 
     let stream = UnixStream::connect(&socket_path)
         .await
