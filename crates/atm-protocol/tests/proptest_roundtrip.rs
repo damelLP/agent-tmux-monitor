@@ -175,8 +175,17 @@ fn arb_timestamp_string() -> impl Strategy<Value = String> {
 ///   are grouped into themed bundles.
 /// - Each bundle is `.boxed()` to type-erase the intermediate `Strategy`.
 ///   Without boxing, the monomorphized generic type for the full chain
-///   overflows the default 2 MiB test thread stack on debug builds.
+///   overflows the default 2 MiB test thread stack on debug builds (the
+///   crash surfaces only when this function is composed into the larger
+///   `arb_daemon_message` strategy via `SessionList`/`SessionUpdated`).
+///
+/// **If you add another field bundle here, also call `.boxed()` on it** —
+/// otherwise the test binary may stack-overflow on `cargo test` without
+/// any logical regression in the protocol itself.
 fn arb_session_view() -> impl Strategy<Value = SessionView> {
+    // NOTE: every bundle below ends in `.boxed()` on purpose — see the
+    // doc comment above before removing or adding one.
+
     // Identity + status (4)
     let identity = (
         arb_session_id(),
