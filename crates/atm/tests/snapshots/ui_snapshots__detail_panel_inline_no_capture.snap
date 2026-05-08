@@ -1,0 +1,24 @@
+---
+source: crates/atm/tests/ui_snapshots.rs
+expression: out
+---
+"┌ Details ─────────────────────────────────────────────────┐"
+"│                                                          │"
+"│  Status: working                                         │"
+"│                                                          │"
+"│  ID: abc12345  Agent: general  Model: Opus 4.5           │"
+"│                                                          │"
+"│  Context [=========           ] 45% (45%)                │"
+"│                                                          │"
+"│  Duration: 5m    Activity: 10s ago                       │"
+"│  Lines:    +100 -20                                      │"
+"│                                                          │"
+"│  Dir: /home/dev/project-alpha                            │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"│                                                          │"
+"└──────────────────────────────────────────────────────────┘"

@@ -1,0 +1,7 @@
+---
+source: crates/atm/tests/ui_snapshots.rs
+expression: snap
+---
+"┌──────────────────────────────────────────────────────────────────────────────┐"
+"│ j/↓ down  k/↑ up  gg top  G end  ^d/^u page    |  Enter jump  r rescan  q qui│"
+"└──────────────────────────────────────────────────────────────────────────────┘"

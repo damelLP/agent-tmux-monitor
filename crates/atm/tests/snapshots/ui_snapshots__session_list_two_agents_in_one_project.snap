@@ -1,0 +1,16 @@
+---
+source: crates/atm/tests/ui_snapshots.rs
+expression: out
+---
+"┌ Sessions (2) ────────────────────────┐"
+"│>▼ project-alpha                      │"
+"│   >   45% abc12345 Opus 4.5          │"
+"│   -   72% def67890 Sonne...          │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"│                                      │"
+"└──────────────────────────────────────┘"
