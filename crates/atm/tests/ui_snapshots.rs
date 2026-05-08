@@ -1,24 +1,26 @@
 //! Snapshot tests for ATM TUI widgets.
 //!
-//! Renders individual widgets into a fixed-size `TestBackend` buffer
-//! and compares the textual output against committed `.snap` files.
-//! Intended to catch unintended visual regressions in widget rendering.
+//! Each test renders a single widget into a fixed-size `TestBackend` and
+//! snapshots the resulting `Buffer` via `insta::assert_debug_snapshot!`,
+//! which captures both cell contents AND styles (fg/bg/modifier). That
+//! lets us catch color/bold regressions in addition to layout/text drift —
+//! `TestBackend`'s `Display` impl strips styles, so we use `Debug` instead.
 //!
 //! To regenerate snapshots after an intentional change:
 //!     INSTA_UPDATE=always cargo test -p atm-tui --test ui_snapshots
-//! Then visually inspect the diff before committing the new `.snap` files.
+//! Then visually inspect the diff (`cargo insta review`) before committing.
 
 use std::sync::Mutex;
 
 use atm_core::{SessionId, SessionStatus, SessionView};
 use atm_tui::app::{App, AppState};
 use atm_tui::ui::{
-    detail_panel::render_detail_panel_inline,
+    detail_panel::{render_compact_preview, render_detail_panel_inline},
     help_popup::render_help_popup,
-    session_list::render_session_list,
-    status_bar::{render_footer, render_header},
+    session_list::{render_compact_session_list, render_session_list},
+    status_bar::{render_compact_footer, render_footer, render_header},
 };
-use ratatui::{backend::TestBackend, layout::Rect, Terminal};
+use ratatui::{backend::TestBackend, buffer::Buffer, layout::Rect, Terminal};
 
 /// Serializes tests that mutate process-wide environment variables.
 /// Multiple integration tests share one binary and run in parallel by default;
@@ -64,7 +66,7 @@ fn make_session(
         status,
         status_label: status_label.to_string(),
         activity_detail: None,
-        should_blink: false,
+        should_blink: matches!(status, SessionStatus::AttentionNeeded),
         status_icon: ">".to_string(),
         context_percentage: ctx_pct,
         context_display: format!("{}%", ctx_pct as u32),
@@ -76,7 +78,7 @@ fn make_session(
         duration_seconds: 300.0,
         lines_display: "+100 -20".to_string(),
         working_directory: Some(project.to_string()),
-        needs_attention: false,
+        needs_attention: matches!(status, SessionStatus::AttentionNeeded),
         last_activity_display: "10s ago".to_string(),
         age_display: "5m ago".to_string(),
         started_at: started_at.to_string(),
@@ -92,7 +94,6 @@ fn make_session(
 fn make_app_with_sessions() -> App {
     let mut app = App::new();
     app.state = AppState::Connected;
-    // started_at descending → working session listed first (newer)
     app.update_sessions(vec![
         make_session(
             "abc12345-aaaa-bbbb-cccc-000000000001",
@@ -120,7 +121,9 @@ fn make_app_with_sessions() -> App {
     app
 }
 
-fn render_to_string<F>(width: u16, height: u16, draw: F) -> String
+/// Renders into a `TestBackend` and returns a clone of the resulting buffer.
+/// Cloning is necessary because `terminal.backend()` borrows the terminal.
+fn render_buffer<F>(width: u16, height: u16, draw: F) -> Buffer
 where
     F: FnOnce(&mut ratatui::Frame, Rect),
 {
@@ -132,17 +135,101 @@ where
             draw(frame, area);
         })
         .expect("draw frame");
-    format!("{}", terminal.backend())
+    terminal.backend().buffer().clone()
 }
+
+// ---- Split layout: session_list -------------------------------------------
 
 #[test]
 fn session_list_two_agents_in_one_project() {
     let app = make_app_with_sessions();
-    let out = render_to_string(40, 12, |frame, area| {
+    let buf = render_buffer(40, 12, |frame, area| {
         render_session_list(frame, area, &app);
     });
-    insta::assert_snapshot!(out);
+    insta::assert_debug_snapshot!(buf);
 }
+
+#[test]
+fn session_list_attention_needed_row() {
+    let mut app = App::new();
+    app.state = AppState::Connected;
+    app.blink_visible = true;
+    app.update_sessions(vec![make_session(
+        "att00000-aaaa-bbbb-cccc-000000000003",
+        "/home/dev/project-alpha",
+        "main",
+        "Opus 4.5",
+        SessionStatus::AttentionNeeded,
+        "attention",
+        88.0,
+        2.10,
+        "2026-01-15T10:10:00Z",
+    )]);
+    let buf = render_buffer(40, 8, |frame, area| {
+        render_session_list(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+#[test]
+fn session_list_multi_project_with_worktrees() {
+    let mut app = App::new();
+    app.state = AppState::Connected;
+    // Two projects, one with two worktrees → exercises the worktree-grouping branch
+    app.update_sessions(vec![
+        make_session(
+            "alpha001-aaaa-bbbb-cccc-000000000001",
+            "/home/dev/project-alpha",
+            "main",
+            "Opus 4.5",
+            SessionStatus::Working,
+            "working",
+            30.0,
+            0.10,
+            "2026-01-15T10:05:00Z",
+        ),
+        make_session(
+            "alpha002-aaaa-bbbb-cccc-000000000002",
+            "/home/dev/project-alpha",
+            "feat-x",
+            "Opus 4.5",
+            SessionStatus::Idle,
+            "idle",
+            55.0,
+            0.20,
+            "2026-01-15T10:00:00Z",
+        ),
+        make_session(
+            "beta0001-aaaa-bbbb-cccc-000000000003",
+            "/home/dev/project-beta",
+            "main",
+            "Sonnet 4.5",
+            SessionStatus::Idle,
+            "idle",
+            10.0,
+            0.05,
+            "2026-01-15T09:55:00Z",
+        ),
+    ]);
+    // Force the worktree grouping by giving the alpha project a 2nd worktree path
+    if let Some(s) = app
+        .sessions
+        .values_mut()
+        .find(|s| s.id_short == "alpha002")
+    {
+        s.worktree_path = Some("/home/dev/project-alpha-feat-x".to_string());
+    }
+    // rebuild_tree is private — replace_sessions triggers it
+    let snapshot: Vec<SessionView> = app.sessions.values().cloned().collect();
+    app.replace_sessions(snapshot);
+
+    let buf = render_buffer(45, 16, |frame, area| {
+        render_session_list(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+// ---- Split layout: detail_panel -------------------------------------------
 
 #[test]
 fn detail_panel_inline_no_capture() {
@@ -157,48 +244,137 @@ fn detail_panel_inline_no_capture() {
         0.50,
         "2026-01-15T10:05:00Z",
     );
-    let out = render_to_string(60, 20, |frame, area| {
+    let buf = render_buffer(60, 20, |frame, area| {
         render_detail_panel_inline(frame, area, Some(&session), &[]);
     });
-    insta::assert_snapshot!(out);
+    insta::assert_debug_snapshot!(buf);
 }
 
 #[test]
 fn detail_panel_inline_empty() {
-    let out = render_to_string(60, 20, |frame, area| {
+    let buf = render_buffer(60, 20, |frame, area| {
         render_detail_panel_inline(frame, area, None, &[]);
     });
-    insta::assert_snapshot!(out);
+    insta::assert_debug_snapshot!(buf);
 }
+
+#[test]
+fn detail_panel_inline_with_capture_split() {
+    // Non-empty captured_output triggers the 40/60 split layout (metadata + terminal)
+    let session = make_session(
+        "abc12345-aaaa-bbbb-cccc-000000000001",
+        "/home/dev/project-alpha",
+        "main",
+        "Opus 4.5",
+        SessionStatus::Working,
+        "working",
+        45.0,
+        0.50,
+        "2026-01-15T10:05:00Z",
+    );
+    let capture = vec![
+        "$ cargo test".to_string(),
+        "   Compiling atm-tui v0.2.2".to_string(),
+        "    Finished in 1.23s".to_string(),
+        "running 5 tests".to_string(),
+        "test ui::snapshot ... ok".to_string(),
+    ];
+    let buf = render_buffer(60, 24, |frame, area| {
+        render_detail_panel_inline(frame, area, Some(&session), &capture);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+// ---- Status bar -----------------------------------------------------------
 
 #[test]
 fn header_connected_with_sessions() {
     let app = make_app_with_sessions();
-    let out = render_to_string(80, 3, |frame, area| {
+    let buf = render_buffer(80, 3, |frame, area| {
         render_header(frame, area, &app);
     });
-    insta::assert_snapshot!(out);
+    insta::assert_debug_snapshot!(buf);
+}
+
+#[test]
+fn header_disconnected_with_retries() {
+    let mut app = App::new();
+    app.state = AppState::Disconnected {
+        // Fixed timestamp so snapshot is stable; not displayed but must be set
+        since: chrono::DateTime::parse_from_rfc3339("2026-01-15T10:00:00Z")
+            .expect("valid rfc3339")
+            .with_timezone(&chrono::Utc),
+        retry_count: 5,
+    };
+    let buf = render_buffer(80, 3, |frame, area| {
+        render_header(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
 }
 
 #[test]
 fn footer_in_tmux() {
-    let snap = with_tmux(|| {
+    let buf = with_tmux(|| {
         let app = App::new();
-        render_to_string(80, 3, |frame, area| {
+        render_buffer(80, 3, |frame, area| {
             render_footer(frame, area, &app);
         })
     });
-    insta::assert_snapshot!(snap);
+    insta::assert_debug_snapshot!(buf);
 }
+
+// ---- Help popup -----------------------------------------------------------
 
 #[test]
 fn help_popup_in_tmux() {
     // Larger terminal so the centered popup (60% × 70%) is big enough
     // to display every keybinding entry without clipping.
-    let snap = with_tmux(|| {
-        render_to_string(100, 40, |frame, area| {
+    let buf = with_tmux(|| {
+        render_buffer(100, 40, |frame, area| {
             render_help_popup(frame, area);
         })
     });
-    insta::assert_snapshot!(snap);
+    insta::assert_debug_snapshot!(buf);
+}
+
+// ---- Compact (sidebar) layout --------------------------------------------
+
+#[test]
+fn compact_session_list_narrow() {
+    let app = make_app_with_sessions();
+    let buf = render_buffer(28, 12, |frame, area| {
+        render_compact_session_list(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+#[test]
+fn compact_preview_falls_back_to_status() {
+    // project_root points to a non-existent path so beads lookup returns
+    // empty and the renderer falls back to displaying the status line.
+    // This keeps the test deterministic without an FS fixture.
+    let session = make_session(
+        "abc12345-aaaa-bbbb-cccc-000000000001",
+        "/nonexistent/atm-snapshot-test",
+        "main",
+        "Opus 4.5",
+        SessionStatus::Working,
+        "working",
+        45.0,
+        0.50,
+        "2026-01-15T10:05:00Z",
+    );
+    let buf = render_buffer(30, 8, |frame, area| {
+        render_compact_preview(frame, area, Some(&session), &[]);
+    });
+    insta::assert_debug_snapshot!(buf);
+}
+
+#[test]
+fn compact_footer_default() {
+    let app = App::new();
+    let buf = render_buffer(30, 1, |frame, area| {
+        render_compact_footer(frame, area, &app);
+    });
+    insta::assert_debug_snapshot!(buf);
 }
