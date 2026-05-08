@@ -83,6 +83,26 @@ fn atm_binary() -> Option<PathBuf> {
     option_env!("CARGO_BIN_EXE_atm").map(PathBuf::from)
 }
 
+/// Runs a prepared `tmux ...` `Command`, capturing both streams, and
+/// panics with stderr included if it fails. Use whenever a tmux
+/// invocation's failure is signal — `expect("...")` on its own only
+/// catches "couldn't even spawn tmux" and silently swallows everything
+/// tmux itself prints to stderr.
+fn run_tmux_or_panic(cmd: &mut Command, label: &str) -> Vec<u8> {
+    let output = cmd
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn tmux for {label}: {e}"));
+    if !output.status.success() {
+        panic!(
+            "tmux {label} failed (exit {:?})\nstderr: {}\nstdout: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim(),
+            String::from_utf8_lossy(&output.stdout).trim(),
+        );
+    }
+    output.stdout
+}
+
 /// Returns `Some(path)` if `python3` resolves on PATH, `None` otherwise.
 fn python3_on_path() -> Option<PathBuf> {
     let path_var = std::env::var_os("PATH")?;
@@ -207,13 +227,8 @@ impl PrivateTmux {
         for (k, v) in env {
             cmd.env(k, v);
         }
-        let status = cmd
-            .args(["-L", socket_label, "new-session", "-d", "-s", session_name])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .expect("spawn tmux new-session");
-        assert!(status.success(), "tmux new-session failed");
+        cmd.args(["-L", socket_label, "new-session", "-d", "-s", session_name]);
+        run_tmux_or_panic(&mut cmd, "new-session");
 
         Self {
             socket_label: socket_label.to_string(),
@@ -729,30 +744,17 @@ async fn atm_atmd_tmux_end_to_end() {
     // since per-window sidebar injection is the loop attach owns.
     let tmux_attach_client =
         RealTmuxClient::with_socket(attach_tmux.label().to_string());
-    Command::new("tmux")
-        .args([
+    for label in ["new-window (2nd)", "new-window (3rd)"] {
+        let mut cmd = Command::new("tmux");
+        cmd.args([
             "-L",
             attach_tmux.label(),
             "new-window",
             "-t",
             &attach_session_name,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("create second window");
-    Command::new("tmux")
-        .args([
-            "-L",
-            attach_tmux.label(),
-            "new-window",
-            "-t",
-            &attach_session_name,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .expect("create third window");
+        ]);
+        run_tmux_or_panic(&mut cmd, label);
+    }
 
     let pre_attach_panes = tmux_attach_client
         .list_panes()
