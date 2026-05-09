@@ -17,10 +17,14 @@
 //!
 //! 4. **`atm spawn` with a `claude` fixture**: run the actual `atm spawn`
 //!    subcommand against our isolated tmux server (via `ATM_TMUX_SOCKET`),
-//!    using a Python shim named `claude` placed first on PATH. The shim
-//!    connects to atmd over its socket, sends a `UserPromptSubmit` hook
-//!    event carrying `$TMUX_PANE`, and sleeps to keep the pane alive
-//!    (atmd's stale-session reaper runs every 2s). The test then polls
+//!    using a Python shim injected by absolute path through
+//!    `ATM_SPAWN_COMMAND`. (Earlier iterations tried prepending the
+//!    shim dir to `PATH`, but interactive shell init re-derives `PATH`
+//!    from scratch and dropped the prepended dir. Absolute-path
+//!    injection sidesteps that entirely.) The shim connects to atmd
+//!    over its socket, sends a `UserPromptSubmit` hook event carrying
+//!    `$TMUX_PANE`, and sleeps to keep the pane alive (atmd's
+//!    stale-session reaper runs every 2s). The test then polls
 //!    `atm list --format json` until a session whose `tmux_pane` matches
 //!    the pane atm spawn created shows up. This validates the entire
 //!    spawn → tmux split → hook event → registry update loop.
@@ -46,6 +50,13 @@
 //! 4 only — when `python3` is unavailable.
 //!
 //! Per CLAUDE.md, tests are an explicit `unwrap()`/`expect()`-allowed zone.
+//!
+//! The harness is Unix-only (uses `std::os::unix` and SIGTERM via libc).
+//! That's not a real loss of coverage — the production code is Unix-only
+//! too (atmd uses libc::kill, the daemonize crate, /proc walking) — but
+//! gating the file lets `cargo check`/`cargo test` pass cleanly on
+//! Windows runners instead of spewing missing-symbol errors.
+#![cfg(unix)]
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -192,8 +203,10 @@ except Exception as e:
 ///
 /// Env vars passed to `start_with_env(...)` propagate into the tmux server's
 /// process — and from there into the shells running in panes the server
-/// creates. That's the channel by which scenario 4's `claude` shim sees
-/// `ATM_SOCKET` and the shim directory on `PATH`.
+/// creates. Scenario 4 uses this channel to hand the `claude` shim the
+/// `ATM_SOCKET` it needs to phone home to atmd. (The shim path itself is
+/// injected via `ATM_SPAWN_COMMAND` at the `atm spawn` invocation, not
+/// via tmux env, so PATH precedence isn't load-bearing here.)
 struct PrivateTmux {
     socket_label: String,
 }

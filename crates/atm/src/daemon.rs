@@ -47,6 +47,19 @@ pub fn is_daemon_running() -> bool {
 ///
 /// Spawns `atmd start -d` as a detached process.
 /// Returns Ok(()) if the command was spawned successfully.
+///
+/// # Env propagation
+///
+/// `ATM_SOCKET` is forwarded explicitly so the spawned daemon binds to
+/// the same socket the client will connect to via
+/// `client::resolve_socket_path()`. `Command::spawn` would inherit the
+/// var implicitly anyway, but stating it here keeps the contract
+/// visible — a future refactor that adds `.env_clear()` "for
+/// cleanliness" won't silently break the auto-start path.
+///
+/// Empty values are treated as unset (matching `resolve_socket_path`),
+/// so atmd falls back to its own default rather than trying to bind an
+/// empty path.
 fn spawn_daemon() -> std::io::Result<()> {
     // Find atmd binary - try same directory as current binary first
     let atmd_path = std::env::current_exe()
@@ -57,13 +70,15 @@ fn spawn_daemon() -> std::io::Result<()> {
 
     debug!(path = %atmd_path.display(), "Starting daemon");
 
-    // Spawn as detached process
-    Command::new(&atmd_path)
-        .args(["start", "-d"])
+    let mut cmd = Command::new(&atmd_path);
+    cmd.args(["start", "-d"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()?;
+        .stderr(std::process::Stdio::null());
+    if let Some(socket) = std::env::var_os("ATM_SOCKET").filter(|v| !v.is_empty()) {
+        cmd.env("ATM_SOCKET", socket);
+    }
+    cmd.spawn()?;
 
     Ok(())
 }
