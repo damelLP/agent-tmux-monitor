@@ -205,8 +205,12 @@ fn arb_session_view() -> impl Strategy<Value = SessionView> {
         .boxed();
 
     // Numerics (3 f64s)
-    let numerics =
-        (arb_realistic_f64(), arb_realistic_f64(), arb_realistic_f64()).boxed();
+    let numerics = (
+        arb_realistic_f64(),
+        arb_realistic_f64(),
+        arb_realistic_f64(),
+    )
+        .boxed();
 
     // Display strings (6)
     let displays = (
@@ -353,12 +357,12 @@ fn arb_client_message() -> impl Strategy<Value = ClientMessage> {
 fn arb_daemon_message() -> impl Strategy<Value = DaemonMessage> {
     prop_oneof![
         // Connected
-        (arb_protocol_version(), arb_tricky_string()).prop_map(
-            |(protocol_version, client_id)| DaemonMessage::Connected {
+        (arb_protocol_version(), arb_tricky_string()).prop_map(|(protocol_version, client_id)| {
+            DaemonMessage::Connected {
                 protocol_version,
                 client_id,
             }
-        ),
+        }),
         // Rejected
         (arb_tricky_string(), arb_protocol_version()).prop_map(|(reason, protocol_version)| {
             DaemonMessage::Rejected {
@@ -379,9 +383,11 @@ fn arb_daemon_message() -> impl Strategy<Value = DaemonMessage> {
         prop_oneof![Just(0u64), Just(u64::MAX), any::<u64>()]
             .prop_map(|seq| DaemonMessage::Pong { seq }),
         // Error { message, code: Option<String> }
-        (arb_tricky_string(), proptest::option::of(arb_tricky_string())).prop_map(
-            |(message, code)| DaemonMessage::Error { message, code }
-        ),
+        (
+            arb_tricky_string(),
+            proptest::option::of(arb_tricky_string())
+        )
+            .prop_map(|(message, code)| DaemonMessage::Error { message, code }),
         // DiscoveryComplete { discovered, failed }
         (any::<u32>(), any::<u32>()).prop_map(|(discovered, failed)| {
             DaemonMessage::DiscoveryComplete { discovered, failed }

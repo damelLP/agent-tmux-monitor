@@ -13,6 +13,7 @@ use std::fmt;
 /// Uses prefix matching for forward compatibility with new date variants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum Model {
     /// Claude Opus 4.6 (claude-opus-4-6-*)
     #[serde(rename = "claude-opus-4-6")]
@@ -44,6 +45,7 @@ pub enum Model {
 
     /// Unknown or non-Anthropic model
     #[serde(other)]
+    #[default]
     Unknown,
 }
 
@@ -156,12 +158,6 @@ pub fn derive_display_name(id: &str) -> String {
         }
     }
     id.to_string()
-}
-
-impl Default for Model {
-    fn default() -> Self {
-        Self::Unknown
-    }
 }
 
 impl fmt::Display for Model {

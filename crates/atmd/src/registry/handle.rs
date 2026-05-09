@@ -136,6 +136,7 @@ impl RegistryHandle {
     ///
     /// - `RegistryError::SessionNotFound` if the session doesn't exist
     /// - `RegistryError::ChannelClosed` if the actor has shut down
+    #[allow(clippy::too_many_arguments)]
     pub async fn apply_hook_event(
         &self,
         session_id: SessionId,

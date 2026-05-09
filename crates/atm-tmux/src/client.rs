@@ -180,7 +180,7 @@ impl TmuxClient for RealTmuxClient {
                 continue;
             }
             let fields: Vec<&str> = line.split('\t').collect();
-            let Some(pane_id) = fields.get(0) else {
+            let Some(pane_id) = fields.first() else {
                 continue;
             };
             let Some(session_name) = fields.get(1) else {
@@ -193,7 +193,7 @@ impl TmuxClient for RealTmuxClient {
                 pane_pid: fields.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
                 width: fields.get(4).and_then(|s| s.parse().ok()).unwrap_or(0),
                 height: fields.get(5).and_then(|s| s.parse().ok()).unwrap_or(0),
-                is_active: fields.get(6).map_or(false, |s| *s == "1"),
+                is_active: fields.get(6).is_some_and(|s| *s == "1"),
             };
             panes.push(pane);
         }
@@ -218,7 +218,7 @@ impl TmuxClient for RealTmuxClient {
         let output = self.run("capture-pane", &["-t", pane, "-p"]).await?;
         // Trim trailing blank lines
         let mut lines: Vec<String> = output.lines().map(|l| l.to_string()).collect();
-        while lines.last().map_or(false, |l| l.trim().is_empty()) {
+        while lines.last().is_some_and(|l| l.trim().is_empty()) {
             lines.pop();
         }
         Ok(lines)

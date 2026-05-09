@@ -68,6 +68,7 @@ where
 /// Builds a fully-populated `SessionView` for snapshot fixtures.
 ///
 /// Uses an ISO-8601 `started_at` so tree ordering is stable.
+#[allow(clippy::too_many_arguments)]
 fn make_session(
     id: &str,
     project: &str,
@@ -233,11 +234,7 @@ fn session_list_multi_project_with_worktrees() {
         ),
     ]);
     // Force the worktree grouping by giving the alpha project a 2nd worktree path
-    if let Some(s) = app
-        .sessions
-        .values_mut()
-        .find(|s| s.id_short == "alpha002")
-    {
+    if let Some(s) = app.sessions.values_mut().find(|s| s.id_short == "alpha002") {
         s.worktree_path = Some("/home/dev/project-alpha-feat-x".to_string());
     }
     // rebuild_tree is private — replace_sessions triggers it
