@@ -239,10 +239,11 @@ pub enum RemovalReason {
     /// Removed to make room for new sessions when registry was full.
     RegistryFull,
 
-    /// Claude Code sent SessionEnd hook event (session closed).
+    /// Adapter (Claude or pi) emitted a session-end lifecycle event
+    /// indicating the agent closed normally.
     SessionEnded,
 
-    /// The Claude Code process died without sending SessionEnd hook.
+    /// The agent process died without emitting a session-end event.
     /// Detected via PID monitoring during cleanup.
     ProcessDied,
 
@@ -256,7 +257,7 @@ impl std::fmt::Display for RemovalReason {
         match self {
             Self::Explicit => write!(f, "explicitly removed"),
             Self::RegistryFull => write!(f, "registry capacity reached"),
-            Self::SessionEnded => write!(f, "session ended by Claude Code"),
+            Self::SessionEnded => write!(f, "session ended"),
             Self::ProcessDied => write!(f, "process died without SessionEnd"),
             Self::Upgraded => write!(f, "upgraded to real session"),
         }
@@ -300,10 +301,7 @@ mod tests {
             RemovalReason::RegistryFull.to_string(),
             "registry capacity reached"
         );
-        assert_eq!(
-            RemovalReason::SessionEnded.to_string(),
-            "session ended by Claude Code"
-        );
+        assert_eq!(RemovalReason::SessionEnded.to_string(), "session ended");
         assert_eq!(
             RemovalReason::ProcessDied.to_string(),
             "process died without SessionEnd"

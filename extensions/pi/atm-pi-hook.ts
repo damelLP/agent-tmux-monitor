@@ -67,69 +67,115 @@ function logDebug(msg: string): void {
 }
 
 /**
- * Sends a single PiEvent envelope to atmd.
+ * Persistent socket connection to atmd for the lifetime of this pi
+ * process. Lazily opened on the first `send()`; reconnects automatically
+ * if dropped (e.g. atmd restarts). One handshake per connection
+ * instead of one per event keeps the daemon log quiet and avoids
+ * thousands of short-lived connections in long pi sessions.
  *
- * Each call opens a new connection, writes connect+event, waits for
- * the writes to flush, then closes. Mirrors how the bash `atm-hook`
- * script behaves (each Claude hook fires a separate process that does
- * its own connect/disconnect). Each call is bounded by a hard timeout
- * so a stalled daemon never blocks pi.
- *
- * Returns a Promise that pi will `await` — ensures buffered writes
- * actually flush before pi proceeds (and especially before pi exits
- * in `--print` mode). If we returned synchronously, pi could exit
- * before the event loop drained pending socket writes.
+ * `pendingSocket` is the in-flight connection while we wait for the
+ * `connect` event; events that fire during the connect race are
+ * buffered in `outbox` and flushed on connect.
  */
-function send(envelope: unknown): Promise<void> {
+let activeSocket: net.Socket | null = null;
+let pendingSocket: net.Socket | null = null;
+const outbox: string[] = [];
+let reconnectScheduled = false;
+
+function openSocket(): void {
+	if (activeSocket || pendingSocket) return;
 	if (!fs.existsSync(SOCKET)) {
 		logDebug(`socket not found: ${SOCKET}`);
-		return Promise.resolve();
+		return;
 	}
 
-	const connectMsg = {
-		protocol_version: { major: 1, minor: 0 },
-		type: "connect",
-		client_id: `pi-hook-${process.pid}`,
-	};
+	const sock = net.createConnection({ path: SOCKET });
+	pendingSocket = sock;
+
+	sock.on("connect", () => {
+		logDebug("socket connected");
+		pendingSocket = null;
+		activeSocket = sock;
+		// Send the protocol handshake once for this connection.
+		const connectMsg = {
+			protocol_version: { major: 1, minor: 0 },
+			type: "connect",
+			client_id: `pi-hook-${process.pid}`,
+		};
+		sock.write(`${JSON.stringify(connectMsg)}\n`);
+		// Drain anything that queued while we were connecting.
+		while (outbox.length > 0) {
+			const line = outbox.shift();
+			if (line !== undefined) sock.write(line);
+		}
+	});
+
+	sock.on("error", (err) => {
+		logDebug(`socket error: ${err.message}`);
+	});
+
+	sock.on("close", () => {
+		logDebug("socket closed");
+		if (pendingSocket === sock) pendingSocket = null;
+		if (activeSocket === sock) activeSocket = null;
+		// Don't reconnect aggressively — let the next send() trigger
+		// it, with a small backoff to avoid flapping.
+		if (!reconnectScheduled) {
+			reconnectScheduled = true;
+			setTimeout(() => {
+				reconnectScheduled = false;
+			}, 1000);
+		}
+	});
+
+	// Daemon may keep this socket open indefinitely; no read timeout.
+	// We only write; if the daemon disconnects, `close` fires.
+	sock.on("data", () => {
+		// We don't expect responses to fire-and-forget pi events. Drain
+		// any frames the daemon sends back.
+	});
+}
+
+/**
+ * Sends a single PiEvent envelope to atmd.
+ *
+ * Fire-and-forget: pi's flow doesn't wait. If the socket is open the
+ * event lands immediately; if it's mid-connect or down, the event is
+ * queued in `outbox` and flushed on connect (or dropped if connect
+ * fails — daemon observability is best-effort, never gate pi's flow
+ * on it).
+ */
+function send(envelope: unknown): void {
 	const dataMsg = {
 		protocol_version: { major: 1, minor: 0 },
 		type: "pi_event",
 		data: envelope,
 	};
+	const line = `${JSON.stringify(dataMsg)}\n`;
 
-	return new Promise<void>((resolve) => {
-		let done = false;
-		const finish = (label: string) => {
-			if (done) return;
-			done = true;
-			logDebug(`send finish: ${label}`);
-			try {
-				sock.destroy();
-			} catch {
-				// best-effort
-			}
-			resolve();
-		};
+	if (activeSocket) {
+		try {
+			activeSocket.write(line);
+			return;
+		} catch (e) {
+			logDebug(`write threw: ${(e as Error).message}`);
+			activeSocket = null;
+		}
+	}
 
-		logDebug("send: opening socket");
-		const sock = net.createConnection({ path: SOCKET });
+	if (pendingSocket) {
+		// Queue until connect fires.
+		outbox.push(line);
+		return;
+	}
 
-		sock.on("connect", () => {
-			logDebug("send: connected, writing");
-			sock.write(`${JSON.stringify(connectMsg)}\n`);
-			sock.write(`${JSON.stringify(dataMsg)}\n`, () => {
-				logDebug("send: writes flushed, ending");
-				// Both buffers flushed at this point — close gracefully.
-				sock.end();
-			});
-		});
-
-		sock.on("error", (err) => finish(`error ${err.message}`));
-		sock.on("close", () => finish("close"));
-
-		// Hard cap so we never block pi longer than this.
-		sock.setTimeout(200, () => finish("timeout"));
-	});
+	if (!reconnectScheduled) {
+		outbox.push(line);
+		openSocket();
+	}
+	// If reconnect is back-off-pending, we drop the event silently.
+	// (Bounded outbox would be a future hardening — today's worst case
+	// is a backed-up outbox while atmd is down for the full session.)
 }
 
 /**

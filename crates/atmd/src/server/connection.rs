@@ -138,7 +138,7 @@ impl ConnectionHandler {
         // Perform protocol handshake
         match self.handle_handshake().await {
             Ok(()) => {
-                info!(
+                debug!(
                     client_id = ?self.client_id,
                     "Client handshake completed"
                 );
@@ -164,7 +164,7 @@ impl ConnectionHandler {
             );
         }
 
-        info!(client_id = ?self.client_id, "Client disconnected");
+        debug!(client_id = ?self.client_id, "Client disconnected");
         client_id
     }
 
@@ -403,12 +403,12 @@ impl ConnectionHandler {
     /// `LifecycleEvent` at this boundary, so the registry below sees
     /// only the abstract event vocabulary.
     async fn handle_hook_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
-        info!(client_id = ?self.client_id, "Received hook event data");
+        debug!(client_id = ?self.client_id, "Received hook event data");
 
         let raw_event: RawHookEvent =
             serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
 
-        info!(
+        debug!(
             session_id = %raw_event.session_id(),
             event_type = ?raw_event.event_type(),
             pid = ?raw_event.pid,
@@ -447,12 +447,12 @@ impl ConnectionHandler {
     /// JSON via `atm-pi-adapter`, translates into a vendor-neutral
     /// `LifecycleEvent`, and forwards to the registry.
     async fn handle_pi_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
-        info!(client_id = ?self.client_id, "Received pi event data");
+        debug!(client_id = ?self.client_id, "Received pi event data");
 
         let raw_event: RawPiEvent =
             serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
 
-        info!(
+        debug!(
             session_id = ?raw_event.session_id,
             event = %raw_event.event,
             pid = ?raw_event.pid,
