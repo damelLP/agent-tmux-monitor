@@ -7,7 +7,7 @@
 //!
 //! All types are designed for async message passing and follow the panic-free policy.
 
-use atm_core::{AgentType, LifecycleEvent, SessionDomain, SessionId, SessionView};
+use atm_core::{AgentType, Harness, LifecycleEvent, SessionDomain, SessionId, SessionView};
 use thiserror::Error;
 use tokio::sync::oneshot;
 
@@ -77,6 +77,10 @@ pub enum RegistryCommand {
         session_id: SessionId,
         /// The vendor-neutral lifecycle event
         event: LifecycleEvent,
+        /// Which adapter is feeding the event. Used to tag newly
+        /// created sessions with the right harness identity so the TUI
+        /// can show vendor badges.
+        harness: Harness,
         /// Process ID of the agent process (for lifecycle tracking)
         pid: Option<u32>,
         /// Tmux pane ID if running in tmux

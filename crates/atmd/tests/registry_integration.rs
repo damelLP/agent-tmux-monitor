@@ -256,6 +256,7 @@ async fn test_event_subscription_hook_event_update() {
                 tool_use_id: None,
                 input: None,
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -525,6 +526,7 @@ async fn test_hook_event_pre_tool_use() {
                 tool_use_id: None,
                 input: None,
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -557,6 +559,7 @@ async fn test_hook_event_post_tool_use() {
                 tool_use_id: None,
                 input: None,
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -572,6 +575,7 @@ async fn test_hook_event_post_tool_use() {
                 tool_use_id: None,
                 is_error: false,
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -601,6 +605,7 @@ async fn test_hook_event_nonexistent_session() {
                 tool_use_id: None,
                 input: None,
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -629,6 +634,7 @@ async fn test_hook_event_session_end() {
         .apply_lifecycle_event(
             SessionId::new("session-end-test"),
             LifecycleEvent::SessionEnd { reason: None },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -671,6 +677,7 @@ async fn test_hook_event_session_end_nonexistent() {
         .apply_lifecycle_event(
             SessionId::new("nonexistent-for-end"),
             LifecycleEvent::SessionEnd { reason: None },
+            atm_core::Harness::Unknown,
             None,
             None,
         )
@@ -909,6 +916,7 @@ async fn test_hook_event_forwards_agent_fields() {
                 id: Some("subagent-001".into()),
                 role: Some("explore".into()),
             },
+            atm_core::Harness::Unknown,
             None,
             None,
         )

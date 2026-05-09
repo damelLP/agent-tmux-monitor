@@ -50,6 +50,11 @@ const FORWARDED_EVENTS = [
 	"model_select",
 	"input",
 	"session_before_compact",
+	// `context` carries cumulative cost/tokens. It fires per provider
+	// request; the daemon-side translator extracts only the latest
+	// `usage.{cost.total, totalTokens}` so the wire payload is small
+	// even though pi attaches the full conversation snapshot.
+	"context",
 ] as const;
 
 function logDebug(msg: string): void {
@@ -142,12 +147,62 @@ function buildEnvelope(eventName: string, payload: unknown, sessionId: string | 
 	};
 }
 
+/**
+ * Wraps `ctx.ui.select` so any extension that opens a permission /
+ * elicitation dialog (most often pi-amplike's bash permission gate)
+ * gets atm visibility for free.
+ *
+ * Pi's `ExtensionContext.ui` is a getter that returns the runner's
+ * shared `uiContext` — a single object across all extensions. Patching
+ * its `select` method affects every extension. We do this once, on the
+ * first event we receive (when the runner is fully initialized).
+ *
+ * The patch:
+ *   1. Emits `atm_needs_input_open` to atmd → session shows "Needs input"
+ *   2. Awaits the original `select` (pi blocks; user picks)
+ *   3. Emits `atm_needs_input_resolved` → session resumes work
+ *
+ * If patching fails (different pi version, future API change), we log
+ * and proceed — the rest of the extension still works.
+ */
+function patchUiSelectOnce(ctx: unknown, sessionId: string | undefined): void {
+	const ctxAny = ctx as { ui?: { select?: unknown; __atmPatched?: boolean } };
+	const ui = ctxAny.ui;
+	if (!ui || typeof ui.select !== "function") {
+		logDebug("patchUiSelectOnce: no ui.select to patch");
+		return;
+	}
+	if (ui.__atmPatched) return; // already wrapped
+	const originalSelect = ui.select.bind(ui) as (
+		title: string,
+		options: string[],
+		opts?: unknown,
+	) => Promise<string | undefined>;
+
+	ui.select = async function patchedSelect(
+		title: string,
+		options: string[],
+		opts?: unknown,
+	): Promise<string | undefined> {
+		logDebug(`ui.select intercepted: ${title.slice(0, 80)}`);
+		void send(buildEnvelope("atm_needs_input_open", { title }, sessionId));
+		try {
+			return await originalSelect(title, options, opts);
+		} finally {
+			void send(buildEnvelope("atm_needs_input_resolved", {}, sessionId));
+		}
+	};
+	ui.__atmPatched = true;
+	logDebug("patchUiSelectOnce: ui.select wrapped");
+}
+
 export default function (pi: ExtensionAPI): void {
 	logDebug(`atm-pi-hook starting, socket=${SOCKET}`);
 
 	// `sessionManager.currentSessionId` only becomes available after
 	// `session_start` fires. Cache it from the first event we see.
 	let cachedSessionId: string | undefined;
+	let uiPatched = false;
 
 	for (const eventName of FORWARDED_EVENTS) {
 		// pi.on takes a string-typed name. The TS type union it expects is
@@ -163,6 +218,13 @@ export default function (pi: ExtensionAPI): void {
 					// Best-effort session id discovery via duck-typed access.
 					const ctxAny = ctx as { sessionManager?: { currentSessionId?: string } };
 					cachedSessionId = ctxAny.sessionManager?.currentSessionId;
+				}
+				if (!uiPatched) {
+					// Patch `ctx.ui.select` once, the first time we have a ctx.
+					// We do it lazily because at extension-load time the runner
+					// may not have its ui bound yet.
+					patchUiSelectOnce(ctx, cachedSessionId);
+					uiPatched = true;
 				}
 				const envelope = buildEnvelope(eventName, payload, cachedSessionId);
 				// Fire-and-forget: pi's flow proceeds without waiting on us.

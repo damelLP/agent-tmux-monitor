@@ -960,6 +960,112 @@ async fn test_e2e_pi_agent_end_translates_to_idle() {
 }
 
 #[tokio::test]
+async fn test_e2e_pi_context_event_drives_cost_and_token_display() {
+    // Pi's `context` event carries cumulative usage on the latest
+    // assistant message. The pi adapter extracts cost/tokens, the
+    // daemon applies them to Session.cost / Session.context — same
+    // fields the Claude status-line path populates. So the TUI shows
+    // a non-zero $ and token count for pi sessions.
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session exists");
+    assert!((view.cost_usd - 0.0).abs() < 1e-9, "cost starts at $0");
+
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "context",
+            serde_json::json!({
+                "type": "context",
+                "messages": [
+                    {"role": "user", "content": "hi"},
+                    {
+                        "role": "assistant",
+                        "usage": {
+                            "input": 1088,
+                            "output": 55,
+                            "totalTokens": 1143,
+                            "cost": {"input": 0.00544, "output": 0.00165, "total": 0.00709}
+                        }
+                    }
+                ]
+            }),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session exists");
+    assert!(
+        (view.cost_usd - 0.00709).abs() < 1e-9,
+        "expected cost 0.00709, got {}",
+        view.cost_usd
+    );
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_e2e_pi_atm_needs_input_open_drives_attention_needed() {
+    // Synthetic event the @atm/pi-hook extension emits when it
+    // intercepts a `ctx.ui.select(...)` call (e.g. pi-amplike's
+    // bash permission gate). This is the load-bearing finding from
+    // the spike encoded as runtime instrumentation.
+    let (server, registry) = TestServer::spawn_with_registry().await;
+    let mut client = server.connect().await;
+    client.handshake(None).await;
+
+    let session_id = SessionId::new("e2e-pi");
+    registry
+        .register(create_test_session(session_id.as_str()))
+        .await
+        .expect("register session");
+
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "atm_needs_input_open",
+            serde_json::json!({"title": "Allow `rm -rf /tmp/junk`?"}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session exists");
+    assert_eq!(view.status_label, "needs input");
+
+    // The dialog closes — session resumes work.
+    client
+        .send(ClientMessage::pi_event(pi_event_json(
+            "atm_needs_input_resolved",
+            serde_json::json!({}),
+        )))
+        .await;
+    sleep(Duration::from_millis(50)).await;
+
+    let view = registry
+        .get_session(session_id.clone())
+        .await
+        .expect("session exists");
+    assert_eq!(view.status_label, "working");
+
+    server.shutdown().await;
+}
+
+#[tokio::test]
 async fn test_e2e_pi_session_shutdown_removes_session() {
     let (server, registry) = TestServer::spawn_with_registry().await;
     let mut client = server.connect().await;

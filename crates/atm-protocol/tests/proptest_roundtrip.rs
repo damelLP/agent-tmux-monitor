@@ -275,6 +275,7 @@ fn arb_session_view() -> impl Strategy<Value = SessionView> {
                 id_short: id.short().to_string(),
                 id,
                 agent_type,
+                harness: "claude".into(),
                 model,
                 status,
                 status_label: status.label().to_string(),

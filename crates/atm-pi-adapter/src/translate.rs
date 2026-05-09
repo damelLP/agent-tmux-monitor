@@ -36,9 +36,68 @@
 //!   ignores them.
 
 use atm_core::{LifecycleEvent, NeedsInputReason, Tool};
+use serde_json::Value;
 
 use crate::event::PiEventType;
 use crate::wire::RawPiEvent;
+
+/// Extracts cumulative `(tokens, cost_usd)` from a pi `context` event's
+/// `messages[]` array.
+///
+/// Pi's wire shape (verified by the spike trace):
+/// ```jsonc
+/// "messages": [
+///   { "role": "user", ... },
+///   { "role": "assistant",
+///     "usage": {
+///       "input": 1088, "output": 55, "totalTokens": 1143,
+///       "cost": { "input": 0.00544, "output": 0.00165, "total": 0.00709 }
+///     },
+///     "provider": "openai-codex",
+///     "model": "gpt-5.5",
+///     ...
+///   }
+/// ]
+/// ```
+///
+/// Cost values are *cumulative for the session* — pi reports the
+/// running total on each assistant message. We pick the **last**
+/// message that has a usage object so we always get the latest
+/// cumulative numbers. Either field returns `None` if not present.
+fn extract_context_usage(messages: Option<&Value>) -> (Option<u64>, Option<f64>) {
+    let Some(arr) = messages.and_then(Value::as_array) else {
+        return (None, None);
+    };
+    // Walk in reverse — the last assistant message has the freshest
+    // cumulative usage.
+    for msg in arr.iter().rev() {
+        let Some(usage) = msg.get("usage") else {
+            continue;
+        };
+        let tokens = usage
+            .get("totalTokens")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                // Fallback: input + output if totalTokens missing.
+                let i = usage.get("input").and_then(Value::as_u64).unwrap_or(0);
+                let o = usage.get("output").and_then(Value::as_u64).unwrap_or(0);
+                let sum = i + o;
+                if sum > 0 {
+                    Some(sum)
+                } else {
+                    None
+                }
+            });
+        let cost_usd = usage
+            .get("cost")
+            .and_then(|c| c.get("total"))
+            .and_then(Value::as_f64);
+        if tokens.is_some() || cost_usd.is_some() {
+            return (tokens, cost_usd);
+        }
+    }
+    (None, None)
+}
 
 impl RawPiEvent {
     /// Translates this pi raw event into a vendor-neutral
@@ -112,11 +171,40 @@ impl RawPiEvent {
                 model: p.model.clone(),
             },
 
+            // Synthetic events emitted by `@atm/pi-hook` when it detects
+            // a `ctx.ui.select(...)` dialog opened/closed in any
+            // extension (most often pi-amplike's permission gate).
+            // This is the load-bearing finding from the spike encoded
+            // as runtime instrumentation: pi has no permission event,
+            // so the hook script wraps `ui.select` and emits these.
+            PiEventType::AtmNeedsInputOpen => LifecycleEvent::NeedsInput {
+                reason: atm_core::NeedsInputReason::Notification {
+                    kind: atm_core::NotificationKind::PermissionPrompt,
+                },
+            },
+            // When the dialog closes, pi resumes work. WorkingStart
+            // transitions out of NeedsInput; the next agent_end /
+            // tool_call will drive further state.
+            PiEventType::AtmNeedsInputResolved => LifecycleEvent::WorkingStart,
+
+            PiEventType::Context => {
+                // Pi's `context` event carries the full conversation
+                // snapshot in `messages[]`. Each assistant message has
+                // `usage.{cost.total, totalTokens, provider, model}`.
+                // We extract just cost+tokens from the *latest*
+                // message that carries usage info — pi reports
+                // cumulative session-wide values there.
+                let (tokens, cost_usd) = extract_context_usage(p.messages.as_ref());
+                if tokens.is_none() && cost_usd.is_none() {
+                    return None;
+                }
+                LifecycleEvent::ContextUpdate { tokens, cost_usd }
+            }
+
             // High-frequency / internal events that don't have a useful
             // user-facing translation today. Adapter author can flesh
             // these out later as we learn what the UI needs.
-            PiEventType::Context
-            | PiEventType::BeforeProviderRequest
+            PiEventType::BeforeProviderRequest
             | PiEventType::AfterProviderResponse
             | PiEventType::BeforeAgentStart
             | PiEventType::TurnStart
@@ -150,6 +238,85 @@ mod tests {
             pid: None,
             tmux_pane: None,
         }
+    }
+
+    #[test]
+    fn atm_needs_input_open_becomes_needs_input_permission_prompt() {
+        // Emitted by @atm/pi-hook when ctx.ui.select(...) is called
+        // (e.g. pi-amplike's bash permission gate).
+        let e = raw(PiEventType::AtmNeedsInputOpen, PiPayload::default());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::NeedsInput {
+                reason: atm_core::NeedsInputReason::Notification {
+                    kind: atm_core::NotificationKind::PermissionPrompt
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn context_event_extracts_latest_usage_into_context_update() {
+        // Real-shape payload mirroring the spike's
+        // /tmp/atm-pi-spike-pid1226148-2026-05-02 trace line.
+        let messages = serde_json::json!([
+            {"role": "user", "content": "Use ls to list /tmp"},
+            {
+                "role": "assistant",
+                "content": [{"type": "toolCall"}],
+                "api": "openai-codex-responses",
+                "provider": "openai-codex",
+                "model": "gpt-5.5",
+                "usage": {
+                    "input": 1088,
+                    "output": 55,
+                    "totalTokens": 1143,
+                    "cost": {"input": 0.00544, "output": 0.00165, "total": 0.00709}
+                },
+                "stopReason": "toolUse"
+            }
+        ]);
+        let e = raw(
+            PiEventType::Context,
+            PiPayload {
+                messages: Some(messages),
+                ..Default::default()
+            },
+        );
+        match e.to_lifecycle_event() {
+            Some(LifecycleEvent::ContextUpdate { tokens, cost_usd }) => {
+                assert_eq!(tokens, Some(1143));
+                assert_eq!(cost_usd, Some(0.00709));
+            }
+            other => panic!("expected ContextUpdate, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn context_event_with_no_usage_returns_none() {
+        let messages = serde_json::json!([
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "hello"} // no usage
+        ]);
+        let e = raw(
+            PiEventType::Context,
+            PiPayload {
+                messages: Some(messages),
+                ..Default::default()
+            },
+        );
+        assert_eq!(e.to_lifecycle_event(), None);
+    }
+
+    #[test]
+    fn atm_needs_input_resolved_becomes_working_start() {
+        // After the dialog closes, pi resumes work — WorkingStart
+        // transitions the session out of NeedsInput.
+        let e = raw(PiEventType::AtmNeedsInputResolved, PiPayload::default());
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::WorkingStart)
+        );
     }
 
     #[test]

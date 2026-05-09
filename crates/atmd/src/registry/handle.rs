@@ -12,7 +12,7 @@
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use atm_core::{LifecycleEvent, SessionDomain, SessionId, SessionView};
+use atm_core::{Harness, LifecycleEvent, SessionDomain, SessionId, SessionView};
 
 use super::commands::{RegistryCommand, RegistryError, SessionEvent};
 
@@ -133,6 +133,7 @@ impl RegistryHandle {
         &self,
         session_id: SessionId,
         event: LifecycleEvent,
+        harness: Harness,
         pid: Option<u32>,
         tmux_pane: Option<String>,
     ) -> Result<(), RegistryError> {
@@ -142,6 +143,7 @@ impl RegistryHandle {
             .send(RegistryCommand::ApplyLifecycleEvent {
                 session_id,
                 event,
+                harness,
                 pid,
                 tmux_pane,
                 respond_to: tx,
@@ -436,6 +438,7 @@ mod tests {
             if let Some(RegistryCommand::ApplyLifecycleEvent {
                 session_id,
                 event,
+                harness,
                 pid,
                 tmux_pane,
                 respond_to,
@@ -450,6 +453,7 @@ mod tests {
                         input: None,
                     }
                 );
+                assert_eq!(harness, Harness::Pi);
                 assert_eq!(pid, Some(12345));
                 assert_eq!(tmux_pane, Some("%5".to_string()));
                 let _ = respond_to.send(Ok(()));
@@ -466,6 +470,7 @@ mod tests {
                     tool_use_id: None,
                     input: None,
                 },
+                Harness::Pi,
                 Some(12345),
                 Some("%5".to_string()),
             )

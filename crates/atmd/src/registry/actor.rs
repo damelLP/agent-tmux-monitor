@@ -157,11 +157,13 @@ impl RegistryActor {
             RegistryCommand::ApplyLifecycleEvent {
                 session_id,
                 event,
+                harness,
                 pid,
                 tmux_pane,
                 respond_to,
             } => {
-                let result = self.handle_apply_lifecycle_event(session_id, event, pid, tmux_pane);
+                let result = self
+                    .handle_apply_lifecycle_event(session_id, event, harness, pid, tmux_pane);
                 let _ = respond_to.send(result);
             }
             RegistryCommand::GetSession {
@@ -668,6 +670,7 @@ impl RegistryActor {
         &mut self,
         session_id: SessionId,
         event: LifecycleEvent,
+        harness: atm_core::Harness,
         pid: Option<u32>,
         tmux_pane: Option<String>,
     ) -> Result<(), RegistryError> {
@@ -761,6 +764,7 @@ impl RegistryActor {
                             AgentType::GeneralPurpose,
                             Model::Unknown,
                         );
+                        session.harness = harness;
                         session.tmux_pane = tmux_pane.clone();
                         let mut infra = SessionInfrastructure::new();
                         infra.set_pid(p);
@@ -1338,6 +1342,7 @@ mod tests {
                 tool_use_id: None,
                 input: None,
             },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1380,6 +1385,7 @@ mod tests {
         actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("test-session-end"),
             event: LifecycleEvent::SessionEnd { reason: None },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1411,6 +1417,7 @@ mod tests {
         actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("nonexistent"),
             event: LifecycleEvent::SessionEnd { reason: None },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1666,6 +1673,7 @@ mod tests {
                 id: Some("agent-abc-123".into()),
                 role: Some("explore".into()),
             },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1696,6 +1704,7 @@ mod tests {
                 id: Some("agent-xyz-456".into()),
                 role: Some("plan".into()),
             },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1709,6 +1718,7 @@ mod tests {
             event: LifecycleEvent::ChildSessionEnd {
                 id: Some("agent-xyz-456".into()),
             },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1739,6 +1749,7 @@ mod tests {
                 id: Some("agent-expired".into()),
                 role: Some("explore".into()),
             },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
             respond_to: tx,
@@ -1787,6 +1798,7 @@ mod tests {
                 id: Some("sub-agent-001".into()),
                 role: Some("explore".into()),
             },
+            harness: atm_core::Harness::Unknown,
             pid: Some(parent_pid),
             tmux_pane: None,
             respond_to: tx,

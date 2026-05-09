@@ -62,6 +62,22 @@ pub enum PiEventType {
     UserBash,
     Input,
 
+    // === Synthetic events emitted by `@atm/pi-hook` ===
+    //
+    // Pi has no event for "ctx.ui.select dialog opened" — the only way
+    // a passive observer can detect that pi is awaiting user permission
+    // is if our extension instruments `ctx.ui.select` itself. When that
+    // happens the extension emits these synthetic events with the
+    // wire `event` field set to the strings below. They are not
+    // produced by pi itself; they're our adapter's contract with the
+    // hook script.
+    /// `atm_needs_input_open` — `ctx.ui.select` was just called by some
+    /// extension (typically pi-amplike's permission gate). Pi is
+    /// blocked awaiting the user's response.
+    AtmNeedsInputOpen,
+    /// `atm_needs_input_resolved` — the dialog closed. Pi resumes work.
+    AtmNeedsInputResolved,
+
     /// Any event name pi emits that this enum doesn't yet recognize.
     Other(String),
 }
@@ -99,6 +115,8 @@ impl PiEventType {
             Self::ModelSelect => "model_select",
             Self::UserBash => "user_bash",
             Self::Input => "input",
+            Self::AtmNeedsInputOpen => "atm_needs_input_open",
+            Self::AtmNeedsInputResolved => "atm_needs_input_resolved",
             Self::Other(s) => s.as_str(),
         }
     }
@@ -141,6 +159,8 @@ impl From<&str> for PiEventType {
             "model_select" => Self::ModelSelect,
             "user_bash" => Self::UserBash,
             "input" => Self::Input,
+            "atm_needs_input_open" => Self::AtmNeedsInputOpen,
+            "atm_needs_input_resolved" => Self::AtmNeedsInputResolved,
             other => Self::Other(other.to_string()),
         }
     }
@@ -177,6 +197,8 @@ impl From<String> for PiEventType {
             "model_select" => Self::ModelSelect,
             "user_bash" => Self::UserBash,
             "input" => Self::Input,
+            "atm_needs_input_open" => Self::AtmNeedsInputOpen,
+            "atm_needs_input_resolved" => Self::AtmNeedsInputResolved,
             _ => Self::Other(s),
         }
     }

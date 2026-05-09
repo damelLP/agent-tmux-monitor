@@ -91,6 +91,13 @@ pub struct PiPayload {
     /// flag is set by the adapter to drive `NeedsInput` translation.
     #[serde(default)]
     pub needs_user_input: Option<bool>,
+
+    // === Synthetic atm events (atm_needs_input_open) ===
+    /// Title/prompt of the dialog that just opened. Some extensions
+    /// (pi-amplike) include the bash command being gated; the title
+    /// surfaces in the TUI's activity-detail field.
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 #[cfg(test)]

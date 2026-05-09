@@ -526,6 +526,13 @@ pub struct SessionDomain {
     /// Type of agent (main, subagent, etc.)
     pub agent_type: AgentType,
 
+    /// Which coding-agent harness drives this session (Claude Code,
+    /// pi, future). Distinct from `agent_type` (which today encodes
+    /// Claude subagent role) — see `crate::harness::Harness` and bead
+    /// `agent-tmux-manager-cag` for the planned `AgentType` rename.
+    #[serde(default)]
+    pub harness: crate::Harness,
+
     /// Claude model being used
     pub model: Model,
 
@@ -606,6 +613,7 @@ impl SessionDomain {
         Self {
             id,
             agent_type,
+            harness: crate::Harness::default(),
             model,
             model_display_override: None,
             status: SessionStatus::Idle,
@@ -639,6 +647,8 @@ impl SessionDomain {
             AgentType::GeneralPurpose, // Default, may be updated by hook events
             model,
         );
+        // Status-line input is only emitted by Claude Code today.
+        session.harness = crate::Harness::ClaudeCode;
 
         // For unknown models, store a display name fallback:
         // prefer provider-supplied display_name, then derive from raw ID
@@ -752,10 +762,38 @@ impl SessionDomain {
                 self.status = SessionStatus::Working;
                 self.current_activity = Some(ActivityDetail::with_context("Compacting"));
             }
-            LifecycleEvent::ContextUpdate { .. } | LifecycleEvent::ProviderModelChange { .. } => {
-                // Metadata-only updates; status unchanged. Real cost/token
-                // application lives on the status-line path today; this
-                // hook is a placeholder for future pi-driven updates.
+            LifecycleEvent::ContextUpdate { tokens, cost_usd } => {
+                // Pi (and future vendors) emit cumulative cost/tokens
+                // through this variant — there's no "status line"
+                // periodic update like Claude. Fold the values into
+                // the same `Session.cost` / `Session.context` fields
+                // the Claude path uses, so the TUI displays them
+                // identically regardless of vendor.
+                if let Some(c) = cost_usd {
+                    self.cost = Money::from_usd(*c);
+                }
+                if let Some(t) = tokens {
+                    // Pi reports cumulative total tokens for the
+                    // session. We store it as `total_input_tokens`
+                    // (matching how the Claude status-line path
+                    // populates this field with cumulative input
+                    // counts). This is admittedly a slight
+                    // semantic mismatch (input vs total), but it
+                    // gives the TUI a non-zero number to display
+                    // and tracks growth over the session.
+                    self.context.total_input_tokens = TokenCount::new(*t);
+                }
+                // Status unchanged: cost/token updates don't
+                // imply a state transition.
+            }
+            LifecycleEvent::ProviderModelChange { .. } => {
+                // Metadata-only update; the model field on the Session
+                // is set at construction today, derived from a Claude
+                // status-line snapshot. Pi mid-session model_select
+                // events fire here; updating Session.model would
+                // require ProviderModelChange to also reach into the
+                // Model enum (which is Claude-shaped). Defer to the
+                // model-axis-decoupling work in `cag`.
             }
             LifecycleEvent::Notification { kind, .. } => {
                 if matches!(kind, Some(NotificationKind::Setup)) {
@@ -1060,6 +1098,11 @@ pub struct SessionView {
     /// Agent type label
     pub agent_type: String,
 
+    /// Coding-agent harness short tag (`"claude"`, `"pi"`, `"?"`).
+    /// Drives the vendor badge in the TUI.
+    #[serde(default)]
+    pub harness: String,
+
     /// Model display name
     pub model: String,
 
@@ -1162,6 +1205,7 @@ impl SessionView {
             id: session.id.clone(),
             id_short: session.id.short().to_string(),
             agent_type: session.agent_type.short_name().to_string(),
+            harness: session.harness.short_tag().to_string(),
             model: if session.model.is_unknown() {
                 session
                     .model_display_override
