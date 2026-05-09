@@ -528,11 +528,11 @@ async fn run_event_loop(
                                             .unwrap_or("%0");
                                         // Query the target pane's cwd for the new agent
                                         let cwd = client.get_pane_cwd(target).await.ok().flatten();
-                                        let mut cmd = "claude".to_string();
-                                        if let Some(ref dir) = cwd {
-                                            let escaped = dir.replace('\'', "'\\''");
-                                            cmd = format!("cd '{escaped}' && {cmd}");
-                                        }
+                                        // Same builder cmd_spawn uses, so the
+                                        // TUI keyboard shortcut and the
+                                        // `atm spawn` subcommand stay in sync —
+                                        // including ATM_SPAWN_COMMAND.
+                                        let cmd = build_spawn_command(cwd.as_deref(), None);
                                         // Split without a command to get an interactive shell
                                         // (ensures claude is on PATH), then send-keys.
                                         match client
@@ -779,6 +779,31 @@ fn resolve_pane_id(sessions: &[SessionView], target: &str) -> Result<String> {
     }
 }
 
+/// Build the shell command string sent to a freshly-split tmux pane.
+///
+/// Honors `ATM_SPAWN_COMMAND` (escape hatch for wrapped/aliased claude
+/// installs and integration-test fixtures); empty is treated as unset.
+/// Single-quotes the command path so spaces/specials in things like
+/// `/Applications/Claude Code.app/...` don't re-tokenize when the
+/// pane's shell parses the resulting string. Quoting `claude` (the
+/// default) is harmless — PATH lookup is unaffected by quoting.
+fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
+    let base = std::env::var("ATM_SPAWN_COMMAND")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "claude".to_string());
+    let escaped_base = base.replace('\'', "'\\''");
+    let mut cmd = format!("'{escaped_base}'");
+    if let Some(m) = model {
+        cmd.push_str(&format!(" --model {m}"));
+    }
+    if let Some(dir) = cwd {
+        let escaped_dir = dir.replace('\'', "'\\''");
+        cmd = format!("cd '{escaped_dir}' && {cmd}");
+    }
+    cmd
+}
+
 async fn cmd_spawn(
     model: Option<String>,
     worktree: Option<String>,
@@ -791,28 +816,6 @@ async fn cmd_spawn(
     }
 
     let client = RealTmuxClient::new();
-
-    // Build the claude command. `ATM_SPAWN_COMMAND` is an escape hatch:
-    // users running claude under a wrapper or alternate path can point
-    // here, and integration tests use it to inject a fixture binary by
-    // absolute path (bypassing PATH lookup, which interactive shell
-    // init can clobber). Empty is treated as unset — quoting `''`
-    // would produce a guaranteed-to-fail shell command.
-    //
-    // Shell-quote the command path itself: it gets concatenated into a
-    // string that the pane's shell parses, so spaces or special chars
-    // in (say) `/Applications/Claude Code.app/Contents/MacOS/claude`
-    // would otherwise re-tokenize. Single-quoting `claude` (the default)
-    // is harmless — PATH lookup is unaffected by quoting.
-    let base_cmd = std::env::var("ATM_SPAWN_COMMAND")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude".to_string());
-    let escaped_base = base_cmd.replace('\'', "'\\''");
-    let mut claude_cmd = format!("'{escaped_base}'");
-    if let Some(ref m) = model {
-        claude_cmd.push_str(&format!(" --model {m}"));
-    }
 
     // Get current pane to split from.
     // Prefer --target-pane (passed by tmux keybindings via #{pane_id}).
@@ -847,11 +850,7 @@ async fn cmd_spawn(
             })
     };
 
-    if let Some(ref dir) = cwd {
-        // Quote the path to handle spaces and special characters safely
-        let escaped = dir.replace('\'', "'\\''");
-        claude_cmd = format!("cd '{escaped}' && {claude_cmd}");
-    }
+    let claude_cmd = build_spawn_command(cwd.as_deref(), model.as_deref());
 
     let pane_dir: atm_tmux::PaneDirection = direction.into();
     // Split without a command so the pane gets an interactive shell (which has
@@ -2043,5 +2042,63 @@ mod prompt_tests {
         let lines: Vec<String> = vec![];
         let prompt = extract_prompt(&lines);
         assert!(prompt.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spawn_command_tests {
+    use super::build_spawn_command;
+
+    /// One single test, because all the cases mutate the
+    /// `ATM_SPAWN_COMMAND` process-global env var and Rust's default
+    /// test runner runs tests in parallel. Splitting into multiple
+    /// `#[test]`s would race. (`serial_test` would solve this but
+    /// isn't worth a dep just for one helper.)
+    #[test]
+    fn build_spawn_command_cases() {
+        let saved = std::env::var_os("ATM_SPAWN_COMMAND");
+
+        // 1. Unset env → default to single-quoted "claude".
+        //    `'claude'` is identical to bare `claude` for execve;
+        //    quoting just removes shell-parsing surprises elsewhere.
+        std::env::remove_var("ATM_SPAWN_COMMAND");
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 2. Empty value is treated as unset (the round-2 fix).
+        std::env::set_var("ATM_SPAWN_COMMAND", "");
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 3. Path containing a space is single-quoted, so the pane's
+        //    shell sees one token instead of re-tokenizing on space.
+        std::env::set_var(
+            "ATM_SPAWN_COMMAND",
+            "/Applications/Claude Code.app/Contents/MacOS/claude",
+        );
+        assert_eq!(
+            build_spawn_command(None, None),
+            "'/Applications/Claude Code.app/Contents/MacOS/claude'"
+        );
+
+        // 4. Embedded single-quote is escaped via the standard POSIX
+        //    trick: close-quote, escape literal, reopen.
+        std::env::set_var("ATM_SPAWN_COMMAND", "/path/it's/claude");
+        assert_eq!(
+            build_spawn_command(None, None),
+            "'/path/it'\\''s/claude'"
+        );
+
+        // 5. Cwd and model compose around the quoted command.
+        std::env::remove_var("ATM_SPAWN_COMMAND");
+        assert_eq!(
+            build_spawn_command(Some("/work/dir"), Some("opus")),
+            "cd '/work/dir' && 'claude' --model opus"
+        );
+
+        // Restore (matters if the dev shell has it set).
+        if let Some(prev) = saved {
+            std::env::set_var("ATM_SPAWN_COMMAND", prev);
+        } else {
+            std::env::remove_var("ATM_SPAWN_COMMAND");
+        }
     }
 }
