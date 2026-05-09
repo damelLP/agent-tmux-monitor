@@ -1,7 +1,10 @@
-//! Session discovery - finds existing Claude Code sessions.
+//! Session discovery - finds existing coding-agent sessions.
 //!
-//! Scans `/proc` for running Claude processes and registers them
-//! with minimal data. Full session data arrives via status line updates.
+//! Scans `/proc` for running agent processes and registers them with
+//! minimal data. Each process is tested against per-harness detectors
+//! (Claude Code, pi, future) and the matching `Harness` is recorded so
+//! the registry tags the session correctly. Full session data arrives
+//! via status-line updates (Claude) or extension events (pi).
 //!
 //! # Async Safety
 //!
@@ -17,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use atm_core::SessionId;
+use atm_core::{Harness, SessionId};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
@@ -69,18 +72,24 @@ pub struct DiscoveryResult {
 }
 
 // ============================================================================
-// Claude Process
+// Discovered Process
 // ============================================================================
 
-/// Information about a running Claude Code process.
+/// Information about a running agent process discovered via /proc.
+///
+/// `harness` records which detector matched — used by the registry to
+/// tag the session so the TUI shows the right vendor badge from the
+/// first frame, before any adapter event arrives.
 #[derive(Debug, Clone)]
-struct ClaudeProcess {
+struct DiscoveredProcess {
     /// Process ID
     pid: u32,
     /// Working directory
     cwd: PathBuf,
     /// Tmux pane ID if running in tmux
     tmux_pane: Option<String>,
+    /// Which coding-agent harness this process belongs to.
+    harness: Harness,
 }
 
 // ============================================================================
@@ -128,11 +137,11 @@ impl DiscoveryService {
     pub async fn discover(&self) -> DiscoveryResult {
         let mut result = DiscoveryResult::default();
 
-        // Scan for Claude processes (blocking I/O in spawn_blocking)
-        let processes = match tokio::task::spawn_blocking(scan_claude_processes).await {
+        // Scan for agent processes (blocking I/O in spawn_blocking)
+        let processes = match tokio::task::spawn_blocking(scan_agent_processes).await {
             Ok(Ok(p)) => p,
             Ok(Err(e)) => {
-                warn!(error = %e, "Failed to scan for Claude processes");
+                warn!(error = %e, "Failed to scan for agent processes");
                 return result;
             }
             Err(e) => {
@@ -142,11 +151,11 @@ impl DiscoveryService {
         };
 
         if processes.is_empty() {
-            debug!("No Claude processes found");
+            debug!("No agent processes found");
             return result;
         }
 
-        debug!(count = processes.len(), "Found Claude processes");
+        debug!(count = processes.len(), "Found agent processes");
 
         // Try to discover each process
         let max_age_secs = self.transcript_max_age_secs;
@@ -206,28 +215,31 @@ impl DiscoveryService {
     /// - `Err` if registration failed
     async fn discover_session(
         &self,
-        process: &ClaudeProcess,
+        process: &DiscoveredProcess,
         #[allow(unused_variables)] max_age_secs: u64,
     ) -> Result<Option<SessionId>, DiscoveryError> {
         let pid = process.pid;
         let cwd = process.cwd.clone();
         let tmux_pane = process.tmux_pane.clone();
+        let harness = process.harness;
 
         // Always use pending-{pid} as the initial session ID.
-        // The real session_id will arrive via status line update.
+        // The real session_id will arrive via status line update or
+        // adapter event.
         let session_id = SessionId::pending_from_pid(pid);
 
         debug!(
             pid,
             session_id = %session_id,
             tmux_pane = ?tmux_pane,
-            "Creating pending session for discovered Claude process"
+            harness = %harness,
+            "Creating pending session for discovered agent process"
         );
 
         // Register the discovered session
         match self
             .registry
-            .register_discovered(session_id.clone(), pid, cwd, tmux_pane)
+            .register_discovered(session_id.clone(), pid, cwd, tmux_pane, harness)
             .await
         {
             Ok(()) => Ok(Some(session_id)),
@@ -240,10 +252,15 @@ impl DiscoveryService {
 // Blocking Filesystem Operations
 // ============================================================================
 
-/// Scans /proc for Claude Code processes.
+/// Scans /proc for coding-agent processes.
 ///
-/// This function performs blocking I/O and should be called via `spawn_blocking`.
-fn scan_claude_processes() -> Result<Vec<ClaudeProcess>, DiscoveryError> {
+/// Single pass: for each PID, dispatches through per-harness detectors
+/// (Claude → pi → …). The first detector that matches wins. Adding a
+/// new harness means adding one detector below; no caller changes.
+///
+/// This function performs blocking I/O and should be called via
+/// `spawn_blocking`.
+fn scan_agent_processes() -> Result<Vec<DiscoveredProcess>, DiscoveryError> {
     let mut processes = Vec::new();
 
     // Read /proc directory
@@ -260,13 +277,29 @@ fn scan_claude_processes() -> Result<Vec<ClaudeProcess>, DiscoveryError> {
             Err(_) => continue,
         };
 
-        // Check if this is a Claude process
-        if let Some(process) = check_claude_process(pid) {
+        if let Some(process) = detect_agent_process(pid) {
             processes.push(process);
         }
     }
 
     Ok(processes)
+}
+
+/// Tries each registered harness detector against `pid`. Returns the
+/// first match or `None`.
+///
+/// Order matters insofar as we want common, fast checks first. Both
+/// `check_claude_process` and `check_pi_process` walk `/proc/{pid}/exe`
+/// then fall back to cmdline; cost is similar. Claude is checked first
+/// only because it's the historic default.
+fn detect_agent_process(pid: u32) -> Option<DiscoveredProcess> {
+    if let Some(p) = check_claude_process(pid) {
+        return Some(p);
+    }
+    if let Some(p) = check_pi_process(pid) {
+        return Some(p);
+    }
+    None
 }
 
 /// Checks if a path string represents a Claude executable.
@@ -281,20 +314,14 @@ fn is_claude_path(path: &str) -> bool {
 
 /// Checks if a PID is a Claude Code process.
 ///
-/// First attempts to identify Claude via `/proc/{pid}/exe`. If that fails
-/// (e.g., permissions, deleted binary, or wrapper script), falls back to
-/// checking `/proc/{pid}/cmdline`.
-///
-/// Returns process info if it's Claude, None otherwise.
-fn check_claude_process(pid: u32) -> Option<ClaudeProcess> {
-    // Try /proc/{pid}/exe first (most reliable when available)
-    if let Some(process) = check_claude_via_exe(pid) {
+/// First attempts to identify via `/proc/{pid}/exe`. Falls back to
+/// `/proc/{pid}/cmdline` for wrapper scripts.
+fn check_claude_process(pid: u32) -> Option<DiscoveredProcess> {
+    if let Some(process) = check_via_exe(pid, is_claude_path, Harness::ClaudeCode) {
         return Some(process);
     }
 
-    // Fallback: try /proc/{pid}/cmdline
-    // This handles cases where Claude is run via a wrapper script
-    let result = check_claude_via_cmdline(pid);
+    let result = check_via_cmdline(pid, is_claude_path, Harness::ClaudeCode);
 
     if result.is_some() {
         trace!(
@@ -306,56 +333,88 @@ fn check_claude_process(pid: u32) -> Option<ClaudeProcess> {
     result
 }
 
-/// Checks if a PID is Claude by reading `/proc/{pid}/exe`.
-fn check_claude_via_exe(pid: u32) -> Option<ClaudeProcess> {
+/// Checks if a PID is a `pi` (https://pi.dev/) process.
+///
+/// `pi` is installed as a node-shebanged script — `comm` reports
+/// `node` rather than `pi` across most setups, so cmdline is the
+/// authoritative match. The spike's recommendation
+/// (`pgrep -fn 'pi-coding-agent|/bin/pi$'`, see
+/// `docs/PI_INTEGRATION.md`) is encoded as `is_pi_path`.
+fn check_pi_process(pid: u32) -> Option<DiscoveredProcess> {
+    if let Some(process) = check_via_exe(pid, is_pi_path, Harness::Pi) {
+        return Some(process);
+    }
+    let result = check_via_cmdline(pid, is_pi_path, Harness::Pi);
+    if result.is_some() {
+        trace!(pid, "Detected pi via cmdline fallback (exe check failed)");
+    }
+    result
+}
+
+/// Checks if a path string represents a pi executable.
+///
+/// Matches:
+/// - `/path/to/bin/pi` (canonical install)
+/// - `pi` (bare command name)
+/// - `.../pi-coding-agent/...` (npm package path; pi is published as
+///   `@mariozechner/pi-coding-agent`)
+fn is_pi_path(path: &str) -> bool {
+    path.ends_with("/bin/pi")
+        || path.ends_with("/pi")
+        || path == "pi"
+        || path.contains("pi-coding-agent")
+}
+
+/// Generic helper: tests `/proc/{pid}/exe` against `path_matches` and
+/// returns a `DiscoveredProcess` tagged with `harness` on match.
+fn check_via_exe(
+    pid: u32,
+    path_matches: fn(&str) -> bool,
+    harness: Harness,
+) -> Option<DiscoveredProcess> {
     let exe_path = format!("/proc/{pid}/exe");
     let exe = std::fs::read_link(&exe_path).ok()?;
     let exe_str = exe.to_string_lossy();
 
-    if !is_claude_path(&exe_str) {
+    if !path_matches(&exe_str) {
         return None;
     }
 
-    get_process_info(pid)
+    get_process_info(pid, harness)
 }
 
-/// Checks if a PID is Claude by reading `/proc/{pid}/cmdline`.
-///
-/// The cmdline file contains the command-line arguments, NUL-separated.
-/// Some environments run Claude via wrappers (env, bash, etc.), which means
-/// the actual "claude" executable appears later in the argument list.
-///
-/// We check arguments that look like executable invocations (not flag arguments
-/// or file paths passed as data).
-fn check_claude_via_cmdline(pid: u32) -> Option<ClaudeProcess> {
+/// Generic helper: scans `/proc/{pid}/cmdline` arguments and returns
+/// a `DiscoveredProcess` tagged with `harness` if any non-flag arg
+/// satisfies `path_matches`.
+fn check_via_cmdline(
+    pid: u32,
+    path_matches: fn(&str) -> bool,
+    harness: Harness,
+) -> Option<DiscoveredProcess> {
     let cmdline_path = format!("/proc/{pid}/cmdline");
     let cmdline_bytes = std::fs::read(&cmdline_path).ok()?;
 
-    // cmdline is NUL-separated; split and check each argument
-    // Look for arguments that appear to be the Claude executable itself,
-    // not arguments/paths passed TO Claude (which might contain "claude" in their path)
-    let is_claude = cmdline_bytes
+    let matched = cmdline_bytes
         .split(|&b| b == 0)
         .filter_map(|bytes| std::str::from_utf8(bytes).ok())
         .filter(|s| !s.is_empty())
         .any(|arg| {
-            // Skip arguments that start with dash (flags like --config)
+            // Skip flag arguments (e.g. --config)
             if arg.starts_with('-') {
                 return false;
             }
-            // Check if this argument is the claude executable
-            is_claude_path(arg)
+            path_matches(arg)
         });
 
-    if !is_claude {
+    if !matched {
         return None;
     }
 
-    get_process_info(pid)
+    get_process_info(pid, harness)
 }
 
 /// Gets process info (cwd, tmux pane) for a PID.
-fn get_process_info(pid: u32) -> Option<ClaudeProcess> {
+fn get_process_info(pid: u32, harness: Harness) -> Option<DiscoveredProcess> {
     // Read working directory
     let cwd_path = format!("/proc/{pid}/cwd");
     let cwd = std::fs::read_link(&cwd_path).ok()?;
@@ -363,10 +422,11 @@ fn get_process_info(pid: u32) -> Option<ClaudeProcess> {
     // Try to find tmux pane for this process
     let tmux_pane = find_pane_for_pid(pid);
 
-    Some(ClaudeProcess {
+    Some(DiscoveredProcess {
         pid,
         cwd,
         tmux_pane,
+        harness,
     })
 }
 

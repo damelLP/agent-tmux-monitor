@@ -195,9 +195,11 @@ impl RegistryActor {
                 pid,
                 cwd,
                 tmux_pane,
+                harness,
                 respond_to,
             } => {
-                let result = self.handle_register_discovered(session_id, pid, cwd, tmux_pane);
+                let result =
+                    self.handle_register_discovered(session_id, pid, cwd, tmux_pane, harness);
                 let _ = respond_to.send(result);
             }
         }
@@ -324,6 +326,7 @@ impl RegistryActor {
         pid: u32,
         cwd: PathBuf,
         tmux_pane: Option<String>,
+        harness: atm_core::Harness,
     ) -> Result<(), RegistryError> {
         // PID 0 is invalid
         if pid == 0 {
@@ -401,11 +404,11 @@ impl RegistryActor {
             AgentType::GeneralPurpose, // Will be updated when status line arrives
             Model::Unknown,            // Will be updated when status line arrives
         );
-        // Today the discoverer scans /proc for `comm == "claude"` only,
-        // so any session that lands here is Claude. When `hfv` (the
-        // pluggable Discoverer trait) lands, this needs to come from
-        // whichever discoverer found the process. For now, hardcode.
-        session.harness = atm_core::Harness::ClaudeCode;
+        // Tag the session with whichever harness the discoverer
+        // matched (Claude, pi, future). The TUI uses this for the
+        // vendor badge; subsequent adapter events can refine it but
+        // not change identity.
+        session.harness = harness;
         // Resolve project/worktree from working directory.
         // Note: these are local stat() calls walking up ~5 dirs (~5μs),
         // acceptable inline per Tokio guidelines for sub-100μs sync work.
@@ -1573,6 +1576,7 @@ mod tests {
             pid: current_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         };
         actor.handle_command(cmd);
@@ -1792,6 +1796,7 @@ mod tests {
             pid: parent_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
 
@@ -1825,6 +1830,7 @@ mod tests {
             pid: child_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
 
@@ -1879,6 +1885,7 @@ mod tests {
             pid: current_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         };
         actor.handle_command(cmd);
@@ -1960,6 +1967,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2019,6 +2027,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2055,6 +2064,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2096,6 +2106,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2144,6 +2155,7 @@ mod tests {
             pid: current_pid,
             cwd: repo_a.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();

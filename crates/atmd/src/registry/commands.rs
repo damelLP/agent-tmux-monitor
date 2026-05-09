@@ -142,12 +142,14 @@ pub enum RegistryCommand {
     RegisterDiscovered {
         /// ID of the discovered session (from transcript filename)
         session_id: SessionId,
-        /// Process ID of the Claude Code process
+        /// Process ID of the discovered agent process
         pid: u32,
-        /// Working directory of the Claude process
+        /// Working directory of the agent process
         cwd: std::path::PathBuf,
         /// Tmux pane ID if running in tmux
         tmux_pane: Option<String>,
+        /// Which harness the discoverer matched (Claude / pi / future).
+        harness: Harness,
         /// Channel to send the result
         respond_to: oneshot::Sender<Result<(), RegistryError>>,
     },

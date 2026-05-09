@@ -973,6 +973,7 @@ async fn test_project_resolution_on_discovery() {
             current_pid,
             working_dir.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .expect("discovery registration should succeed");
@@ -1016,6 +1017,7 @@ async fn test_status_line_cwd_change_updates_git_info() {
             current_pid,
             repo_a.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .expect("should register");
@@ -1084,6 +1086,7 @@ async fn test_status_line_same_cwd_does_not_re_resolve() {
             current_pid,
             repo.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .unwrap();
@@ -1136,6 +1139,7 @@ async fn test_rescan_preserves_metadata_for_existing_pid() {
             current_pid,
             repo.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .unwrap();
@@ -1177,6 +1181,7 @@ async fn test_rescan_preserves_metadata_for_existing_pid() {
             current_pid,
             repo.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .unwrap();
@@ -1212,6 +1217,7 @@ async fn test_rescan_refreshes_git_info() {
             current_pid,
             repo.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .unwrap();
@@ -1232,6 +1238,7 @@ async fn test_rescan_refreshes_git_info() {
             current_pid,
             repo.clone(),
             None,
+            atm_core::Harness::Unknown,
         )
         .await
         .unwrap();

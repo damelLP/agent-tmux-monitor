@@ -236,6 +236,7 @@ impl RegistryHandle {
         pid: u32,
         cwd: std::path::PathBuf,
         tmux_pane: Option<String>,
+        harness: Harness,
     ) -> Result<(), RegistryError> {
         let (tx, rx) = oneshot::channel();
 
@@ -245,6 +246,7 @@ impl RegistryHandle {
                 pid,
                 cwd,
                 tmux_pane,
+                harness,
                 respond_to: tx,
             })
             .await
