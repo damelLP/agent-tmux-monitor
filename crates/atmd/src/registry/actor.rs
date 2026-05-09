@@ -1811,7 +1811,7 @@ mod tests {
         assert_eq!(actor.pending_subagent_count(), 1);
 
         // Spawn a real child process so we have a descendant PID
-        let child = std::process::Command::new("sleep")
+        let mut child = std::process::Command::new("sleep")
             .arg("60")
             .spawn()
             .expect("failed to spawn sleep process");
@@ -1858,9 +1858,8 @@ mod tests {
         }
 
         // Clean up the sleep process
-        let _ = std::process::Command::new("kill")
-            .arg(child_pid.to_string())
-            .status();
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[tokio::test]
