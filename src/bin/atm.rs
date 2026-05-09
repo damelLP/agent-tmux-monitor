@@ -666,9 +666,19 @@ fn create_log_file() -> Option<std::fs::File> {
 // CLI Command Implementations
 // ============================================================================
 
+/// Resolves the daemon socket path, honoring `$ATM_SOCKET` so a user
+/// can run an isolated test daemon (and a matching atm TUI) without
+/// stomping on the system-wide one at `/tmp/atm.sock`. Mirrors the
+/// behaviour of `atmd` and the `atm-hook` bash script.
+fn daemon_socket_path() -> PathBuf {
+    std::env::var("ATM_SOCKET")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("/tmp/atm.sock"))
+}
+
 /// Fetches the current session list from the daemon via one-shot connection.
 async fn fetch_sessions() -> Result<Vec<SessionView>> {
-    let socket_path = PathBuf::from("/tmp/atm.sock");
+    let socket_path = daemon_socket_path();
 
     let stream = UnixStream::connect(&socket_path)
         .await

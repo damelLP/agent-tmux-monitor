@@ -60,8 +60,14 @@ pub struct DaemonConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
+        // Honor `$ATM_SOCKET` so an isolated test daemon (and its
+        // matching atm TUI) doesn't collide with the system-wide
+        // daemon at `/tmp/atm.sock`. Mirrors `atmd` and `atm-hook`.
+        let socket_path = std::env::var("ATM_SOCKET")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("/tmp/atm.sock"));
         Self {
-            socket_path: PathBuf::from("/tmp/atm.sock"),
+            socket_path,
             retry_initial_delay: Duration::from_secs(1),
             retry_max_delay: Duration::from_secs(30),
             retry_multiplier: 2.0,
@@ -544,13 +550,40 @@ mod tests {
     // ------------------------------------------------------------------------
 
     #[test]
-    fn test_daemon_config_default() {
+    fn test_daemon_config_default_falls_back_when_env_unset() {
+        // Tests run in the same process so we don't want to pollute the
+        // env. SAFETY: this test reads/writes a process-global env var;
+        // running `cargo test` with multiple threads may interleave
+        // with `test_daemon_config_default_honors_env`. The two tests
+        // are designed to set ATM_SOCKET back to a known state at the
+        // end so the final state is consistent regardless of order.
+        // SAFETY: only setting env in tests, not in any code path that
+        // could run concurrently with real socket lookups.
+        unsafe {
+            std::env::remove_var("ATM_SOCKET");
+        }
         let config = DaemonConfig::default();
 
         assert_eq!(config.socket_path, PathBuf::from("/tmp/atm.sock"));
         assert_eq!(config.retry_initial_delay, Duration::from_secs(1));
         assert_eq!(config.retry_max_delay, Duration::from_secs(30));
         assert!((config.retry_multiplier - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_daemon_config_default_honors_env_atm_socket() {
+        // SAFETY: see comment in test_daemon_config_default_falls_back_when_env_unset.
+        unsafe {
+            std::env::set_var("ATM_SOCKET", "/tmp/test-override.sock");
+        }
+        let config = DaemonConfig::default();
+        assert_eq!(
+            config.socket_path,
+            PathBuf::from("/tmp/test-override.sock")
+        );
+        unsafe {
+            std::env::remove_var("ATM_SOCKET");
+        }
     }
 
     #[test]
