@@ -44,6 +44,9 @@ pub enum TreeNodeId {
 }
 
 /// A node in the session grouping tree.
+// Agent variant embeds SessionView directly. Boxing it is a deferred refactor
+// that touches every consumer; revisit if/when SessionView stops being a leaf.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TreeNode {
     /// A git project (repo root). Groups all agents across its worktrees.
@@ -121,6 +124,7 @@ impl TreeNode {
 // ============================================================================
 
 /// The kind of row in the flattened tree.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TreeRowKind {
     Project {

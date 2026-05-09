@@ -452,7 +452,7 @@ fn find_active_transcript(project_dir: &Path, max_age_secs: u64) -> Option<PathB
         .collect();
 
     // Sort by modification time (most recent first)
-    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    candidates.sort_by_key(|c| std::cmp::Reverse(c.1));
 
     // Return the most recent
     candidates.into_iter().next().map(|(path, _)| path)
