@@ -400,41 +400,77 @@ impl Client {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn atm_atmd_tmux_end_to_end() {
-    if tmux_on_path().is_none() {
-        eprintln!("SKIP: tmux not on PATH");
-        return;
+/// Shared fixture for all 5 scenarios — daemon, primary tmux server,
+/// shim, binary paths. Scenarios borrow `&E2eEnv` immutably; everything
+/// inside is RAII-cleaned when the fixture drops at end-of-test.
+struct E2eEnv {
+    atm_path: PathBuf,
+    daemon: Daemon,
+    tmux_server: PrivateTmux,
+    tmux: RealTmuxClient,
+    shim_path: PathBuf,
+    _shim_dir_guard: TempDir,
+}
+
+impl E2eEnv {
+    /// Returns `None` (after printing a SKIP line) when any precondition
+    /// is missing. Lets the orchestrator early-return cleanly without
+    /// failing the whole test on minimal CI images.
+    async fn try_setup() -> Option<Self> {
+        if tmux_on_path().is_none() {
+            eprintln!("SKIP: tmux not on PATH");
+            return None;
+        }
+        let atmd_path = match atmd_binary() {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP: CARGO_BIN_EXE_atmd not set");
+                return None;
+            }
+        };
+        let atm_path = match atm_binary() {
+            Some(p) => p,
+            None => {
+                eprintln!("SKIP: CARGO_BIN_EXE_atm not set");
+                return None;
+            }
+        };
+
+        // Daemon comes up first so the tmux server's env can carry
+        // ATM_SOCKET straight into any panes it births. Scenario 4's
+        // shim reads it from there to find the daemon socket.
+        let daemon = Daemon::spawn(&atmd_path).await;
+
+        // Stage the `claude` shim once; scenario 4 will inject it via
+        // ATM_SPAWN_BIN. Earlier iterations tried prepending the shim
+        // dir to PATH, but interactive shell init re-derived PATH from
+        // scratch and dropped it. Absolute-path injection sidesteps
+        // that entirely.
+        let shim_dir_guard = tempfile::tempdir().expect("create shim tempdir");
+        let shim_path = write_claude_shim(shim_dir_guard.path());
+
+        let tmux_server = PrivateTmux::start_with_env([(
+            "ATM_SOCKET",
+            daemon.socket_path.as_os_str(),
+        )]);
+        let tmux = RealTmuxClient::with_socket(tmux_server.label().to_string());
+
+        Some(Self {
+            atm_path,
+            daemon,
+            tmux_server,
+            tmux,
+            shim_path,
+            _shim_dir_guard: shim_dir_guard,
+        })
     }
-    let Some(atmd_path) = atmd_binary() else {
-        eprintln!("SKIP: CARGO_BIN_EXE_atmd not set");
-        return;
-    };
-    let Some(atm_path) = atm_binary() else {
-        eprintln!("SKIP: CARGO_BIN_EXE_atm not set");
-        return;
-    };
+}
 
-    // Daemon comes up first so the tmux server's env can carry ATM_SOCKET
-    // straight into any panes it births. Scenario 4's shim reads it from
-    // there to find the daemon socket.
-    let daemon = Daemon::spawn(&atmd_path).await;
-
-    // Stage the `claude` shim. We invoke it by absolute path via
-    // ATM_SPAWN_BIN, so we don't need to fight the user's shell init
-    // for PATH precedence.
-    let shim_dir_guard = tempfile::tempdir().expect("create shim tempdir");
-    let shim_path = write_claude_shim(shim_dir_guard.path());
-
-    let tmux_server = PrivateTmux::start_with_env([(
-        "ATM_SOCKET",
-        daemon.socket_path.as_os_str(),
-    )]);
-
-    // ====================================================================
-    // Scenario 1: protocol-level e2e via hand-rolled client
-    // ====================================================================
-    let mut client = Client::connect(&daemon.socket_path);
+/// Scenario 1 — protocol-level e2e via a hand-rolled client.
+/// Returns the session id it registered, so scenario 2 can verify it
+/// shows up in the real `atm list` output.
+async fn scenario_protocol_e2e(env: &E2eEnv) -> String {
+    let mut client = Client::connect(&env.daemon.socket_path);
 
     client.send(ClientMessage::connect(Some("e2e-harness".into())));
     match client.recv() {
@@ -477,7 +513,6 @@ async fn atm_atmd_tmux_end_to_end() {
     });
     client.send(ClientMessage::hook_event(hook_event));
 
-    // Poll until the new session appears.
     let deadline = Instant::now() + SESSION_APPEAR_TIMEOUT;
     let found = loop {
         client.send(ClientMessage::list_sessions());
@@ -505,20 +540,21 @@ async fn atm_atmd_tmux_end_to_end() {
     );
 
     client.send(ClientMessage::disconnect());
-    drop(client);
+    session_id
+}
 
-    // ====================================================================
-    // Scenario 2: real `atm` binary as the client
-    // ====================================================================
+/// Scenario 2 — drive the real `atm` binary against the test daemon and
+/// confirm the JSON output contains the session scenario 1 registered.
+async fn scenario_atm_list_client(env: &E2eEnv, expected_session_id: &str) {
     // `atm list --format json` opens its own connection to the daemon. We
     // point it at our test socket via ATM_SOCKET and hand it the same
     // XDG_STATE_HOME so its `ensure_daemon_running` check (which reads the
     // PID file) sees the daemon we already started — preventing it from
     // spawning a second one.
-    let output = Command::new(&atm_path)
+    let output = Command::new(&env.atm_path)
         .args(["list", "--format", "json"])
-        .env("ATM_SOCKET", &daemon.socket_path)
-        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .env("ATM_SOCKET", &env.daemon.socket_path)
+        .env("XDG_STATE_HOME", &env.daemon.state_dir)
         .output()
         .expect("run atm list");
 
@@ -535,20 +571,18 @@ async fn atm_atmd_tmux_end_to_end() {
     let arr = parsed.as_array().expect("atm list emits a JSON array");
     let our_session = arr
         .iter()
-        .find(|s| s.get("id").and_then(Value::as_str) == Some(session_id.as_str()));
+        .find(|s| s.get("id").and_then(Value::as_str) == Some(expected_session_id));
     assert!(
         our_session.is_some(),
-        "real `atm list` JSON output did not contain our session {session_id}; got: {stdout}"
+        "real `atm list` JSON output did not contain our session {expected_session_id}; got: {stdout}"
     );
+}
 
-    // ====================================================================
-    // Scenario 3: drive the isolated tmux server via atm-tmux library
-    // ====================================================================
-    // Unlike atmd's discovery code, `RealTmuxClient` supports `-L`, so this
-    // exercise stays fully isolated from the developer's default tmux.
-    let tmux = RealTmuxClient::with_socket(tmux_server.label().to_string());
-
-    let panes_before = tmux.list_panes().await.expect("list panes (initial)");
+/// Scenario 3 — drive the isolated tmux server through `atm-tmux`'s own
+/// library. Unlike atmd's discovery code, `RealTmuxClient` supports `-L`,
+/// so this stays fully isolated from the developer's default tmux.
+async fn scenario_real_tmux_lib(env: &E2eEnv) {
+    let panes_before = env.tmux.list_panes().await.expect("list panes (initial)");
     assert!(
         !panes_before.is_empty(),
         "private tmux server should have at least the probe session's pane"
@@ -560,7 +594,7 @@ async fn atm_atmd_tmux_end_to_end() {
         .pane_id
         .clone();
 
-    let new_pane = tmux
+    let new_pane = env.tmux
         .split_window(&probe_pane, "30%", PaneDirection::Below, None)
         .await
         .expect("split-window");
@@ -569,19 +603,20 @@ async fn atm_atmd_tmux_end_to_end() {
         "split-window should return a tmux pane id like '%N', got {new_pane:?}"
     );
 
-    tmux.send_keys(&new_pane, "echo atm-e2e-marker")
+    env.tmux.send_keys(&new_pane, "echo atm-e2e-marker")
         .await
         .expect("send-keys");
-    tmux.send_keys(&new_pane, "Enter")
+    env.tmux.send_keys(&new_pane, "Enter")
         .await
         .expect("send-keys Enter");
 
-    // Wait for the echo to land in the pane's scrollback. tmux send-keys is
-    // asynchronous from the shell's perspective, so this is a true poll.
+    // Wait for the echo to land in the pane's scrollback. tmux send-keys
+    // is asynchronous from the shell's perspective, so this is a true
+    // poll, not a sleep-based race.
     let capture_deadline = Instant::now() + Duration::from_secs(3);
     let mut saw_marker = false;
     while Instant::now() < capture_deadline {
-        let lines = tmux.capture_pane(&new_pane).await.unwrap_or_default();
+        let lines = env.tmux.capture_pane(&new_pane).await.unwrap_or_default();
         if lines.iter().any(|l| l.contains("atm-e2e-marker")) {
             saw_marker = true;
             break;
@@ -593,26 +628,19 @@ async fn atm_atmd_tmux_end_to_end() {
         "expected 'atm-e2e-marker' to appear in pane {new_pane}'s capture within 3s"
     );
 
-    let panes_after = tmux.list_panes().await.expect("list panes (after split)");
+    let panes_after = env.tmux.list_panes().await.expect("list panes (after split)");
     assert_eq!(
         panes_after.len(),
         panes_before.len() + 1,
         "split-window should add exactly one pane to the private server"
     );
+}
 
-    // ====================================================================
-    // Scenario 4: real `atm spawn` driving the isolated tmux server, with
-    // a Python `claude` shim registering the new session back to atmd.
-    // ====================================================================
-    // Wrapped in a labeled block so a missing python3 only skips this
-    // scenario; scenario 5 (which doesn't need python) still runs.
-    'scenario_4: {
-    if python3_on_path().is_none() {
-        eprintln!("SKIP scenario 4: python3 not on PATH (scenario 5 still runs)");
-        break 'scenario_4;
-    }
-
-    let panes_pre_spawn = tmux.list_panes().await.expect("list panes (pre-spawn)");
+/// Scenario 4 — `atm spawn` end-to-end. Splits a pane in our isolated
+/// server, the pane runs our Python shim, the shim phones home to atmd,
+/// we verify the registered session has the expected `tmux_pane`.
+async fn scenario_atm_spawn(env: &E2eEnv) {
+    let panes_pre_spawn = env.tmux.list_panes().await.expect("list panes (pre-spawn)");
     let probe_pane_pre_spawn = panes_pre_spawn
         .iter()
         .find(|p| p.session_name == "probe")
@@ -620,7 +648,7 @@ async fn atm_atmd_tmux_end_to_end() {
         .pane_id
         .clone();
 
-    let spawn_output = Command::new(&atm_path)
+    let spawn_output = Command::new(&env.atm_path)
         .args([
             "spawn",
             "--target-pane",
@@ -633,14 +661,14 @@ async fn atm_atmd_tmux_end_to_end() {
         // is_in_tmux() just checks for the env var; any value passes.
         .env("TMUX", "atm-e2e-fixture-no-real-tmux-here")
         // Redirect every tmux invocation atm spawn makes onto our server.
-        .env("ATM_TMUX_SOCKET", tmux_server.label())
+        .env("ATM_TMUX_SOCKET", env.tmux_server.label())
         // Override the hardcoded "claude" command with our shim, by
         // absolute path so shell PATH precedence is irrelevant.
-        .env("ATM_SPAWN_BIN", &shim_path)
+        .env("ATM_SPAWN_BIN", &env.shim_path)
         // The shim talks back to *our* daemon over this socket.
-        .env("ATM_SOCKET", &daemon.socket_path)
+        .env("ATM_SOCKET", &env.daemon.socket_path)
         // ensure_daemon_running reads PID file under XDG_STATE_HOME.
-        .env("XDG_STATE_HOME", &daemon.state_dir)
+        .env("XDG_STATE_HOME", &env.daemon.state_dir)
         .output()
         .expect("run atm spawn");
 
@@ -653,7 +681,7 @@ async fn atm_atmd_tmux_end_to_end() {
     );
 
     // Identify the pane atm spawn just created on our server.
-    let panes_post_spawn = tmux.list_panes().await.expect("list panes (post-spawn)");
+    let panes_post_spawn = env.tmux.list_panes().await.expect("list panes (post-spawn)");
     let new_panes: Vec<_> = panes_post_spawn
         .iter()
         .filter(|p| !panes_pre_spawn.iter().any(|q| q.pane_id == p.pane_id))
@@ -667,36 +695,28 @@ async fn atm_atmd_tmux_end_to_end() {
     );
     let spawned_pane = new_panes[0].pane_id.clone();
 
-    // Poll `atm list --format json` until our fixture-minted session shows
-    // up. We can't filter on tmux_pane alone: pane IDs (`%N`) aren't unique
-    // across tmux servers, and scenario 1's `Discover` may have surfaced
-    // user-side claude processes whose tmux_pane (resolved against the
-    // *default* server) coincidentally collides with our spawned pane in
-    // the *private* server. The "fixture-" prefix is uniquely ours, so we
-    // gate on that AND verify the tmux_pane match for safety.
+    // Poll `atm list --format json` until our fixture-minted session
+    // shows up. We require BOTH the `id` prefix (rules out user-process
+    // discoveries from /proc) AND `tmux_pane == spawned_pane` (defense
+    // in depth — atmd starts fresh per test, but a future test that
+    // spawns multiple shims could otherwise pick the wrong one).
     //
     // Generous deadline because the shim has to: (a) wait for tmux's
-    // send-keys to land, (b) start the Python interpreter, (c) connect to
-    // atmd, (d) hand off the hook event, (e) atmd has to apply it.
+    // send-keys to land, (b) start the Python interpreter, (c) connect
+    // to atmd, (d) hand off the hook event, (e) atmd has to apply it.
     let spawn_deadline = Instant::now() + Duration::from_secs(10);
     let mut fixture_session: Option<Value> = None;
     while Instant::now() < spawn_deadline {
-        let list_output = Command::new(&atm_path)
+        let list_output = Command::new(&env.atm_path)
             .args(["list", "--format", "json"])
-            .env("ATM_SOCKET", &daemon.socket_path)
-            .env("XDG_STATE_HOME", &daemon.state_dir)
+            .env("ATM_SOCKET", &env.daemon.socket_path)
+            .env("XDG_STATE_HOME", &env.daemon.state_dir)
             .output()
             .expect("run atm list");
 
         if list_output.status.success() {
             if let Ok(parsed) = serde_json::from_slice::<Value>(&list_output.stdout) {
                 if let Some(arr) = parsed.as_array() {
-                    // Require BOTH `id` prefix and `tmux_pane` match.
-                    // The id prefix rules out user-process discoveries
-                    // from /proc; the tmux_pane match rules out unrelated
-                    // fixture sessions (defense in depth — atmd starts
-                    // fresh per test, but a future test that spawns
-                    // multiple shims could otherwise pick the wrong one).
                     if let Some(s) = arr.iter().find(|s| {
                         let id_match = s.get("id")
                             .and_then(Value::as_str)
@@ -720,7 +740,7 @@ async fn atm_atmd_tmux_end_to_end() {
         None => {
             // Snapshot what's in the spawned pane so the failure is
             // diagnosable instead of mysterious.
-            let pane_dump = tmux
+            let pane_dump = env.tmux
                 .capture_pane(&spawned_pane)
                 .await
                 .unwrap_or_else(|e| vec![format!("(capture-pane failed: {e})")]);
@@ -736,10 +756,11 @@ async fn atm_atmd_tmux_end_to_end() {
         }
     };
 
-    // The shim records `$TMUX_PANE`, which inside the spawned pane equals
-    // the id atm spawn assigned it. This is what closes the loop: spawn
-    // created the pane, the pane ran the shim, the shim told atmd, atmd
-    // remembered the pane id we know — full e2e for the spawn flow.
+    // The shim records `$TMUX_PANE`, which inside the spawned pane
+    // equals the id atm spawn assigned it. This is what closes the
+    // loop: spawn created the pane, the pane ran the shim, the shim
+    // told atmd, atmd remembered the pane id we know — full e2e for
+    // the spawn flow.
     let registered_pane = session
         .get("tmux_pane")
         .and_then(Value::as_str)
@@ -748,23 +769,18 @@ async fn atm_atmd_tmux_end_to_end() {
         registered_pane, spawned_pane,
         "fixture session's tmux_pane should match the pane atm spawn created"
     );
+}
 
-    // RAII: tmux server killed by PrivateTmux::drop (which also reaps the
-    // shim's pane), daemon killed by Daemon::drop, shim_dir_guard cleaned up.
-    } // end 'scenario_4
-
-    // ====================================================================
-    // Scenario 5: real `atm workspace attach` against an isolated server
-    // ====================================================================
-    // We run on a second tmux server because attach's `--isolate` flag
-    // hardcodes the socket label as `atm-<sessname>`. Sharing the
-    // primary scenario-1-3-4 server would require renaming or making
-    // the production code more flexible — neither is in scope.
-    //
-    // Hooks/scripts go to a sandboxed `data_local_dir` (XDG_DATA_HOME),
-    // so the test never writes to `~/.local/share/atm/`.
+/// Scenario 5 — `atm workspace attach` against a separate isolated
+/// server (attach's `--isolate` flag hardcodes the socket label as
+/// `atm-<sessname>`, so it can't share the primary scenario server).
+/// Asserts every window gets an `@atm-sidebar=1` pane, both hooks are
+/// installed, and the second invocation is idempotent.
+async fn scenario_workspace_attach(env: &E2eEnv) {
     let attach_session_name = format!("jghatt{}", std::process::id());
     let attach_socket_label = format!("atm-{attach_session_name}");
+    // Hooks/scripts go to a sandboxed XDG_DATA_HOME so the test never
+    // writes to `~/.local/share/atm/`.
     let attach_data_dir = tempfile::tempdir().expect("create attach data tempdir");
 
     let attach_tmux = PrivateTmux::start_with_label_session_env(
@@ -803,7 +819,7 @@ async fn atm_atmd_tmux_end_to_end() {
         "expected 3 windows in the simulated workspace, got {pre_attach_window_count}"
     );
 
-    let attach_output = Command::new(&atm_path)
+    let attach_output = Command::new(&env.atm_path)
         .args([
             "workspace",
             "attach",
@@ -812,8 +828,8 @@ async fn atm_atmd_tmux_end_to_end() {
         ])
         .env("ATM_NO_ATTACH", "1")
         .env("XDG_DATA_HOME", attach_data_dir.path())
-        .env("XDG_STATE_HOME", &daemon.state_dir)
-        .env("ATM_SOCKET", &daemon.socket_path)
+        .env("XDG_STATE_HOME", &env.daemon.state_dir)
+        .env("ATM_SOCKET", &env.daemon.socket_path)
         .output()
         .expect("run atm workspace attach");
     assert!(
@@ -870,7 +886,7 @@ async fn atm_atmd_tmux_end_to_end() {
 
     // Idempotency: running attach a second time must NOT add another
     // sidebar to any window. The production code keys off `@atm-sidebar`.
-    let attach_output_2 = Command::new(&atm_path)
+    let attach_output_2 = Command::new(&env.atm_path)
         .args([
             "workspace",
             "attach",
@@ -879,8 +895,8 @@ async fn atm_atmd_tmux_end_to_end() {
         ])
         .env("ATM_NO_ATTACH", "1")
         .env("XDG_DATA_HOME", attach_data_dir.path())
-        .env("XDG_STATE_HOME", &daemon.state_dir)
-        .env("ATM_SOCKET", &daemon.socket_path)
+        .env("XDG_STATE_HOME", &env.daemon.state_dir)
+        .env("ATM_SOCKET", &env.daemon.socket_path)
         .output()
         .expect("run atm workspace attach (second time)");
     assert!(
@@ -897,6 +913,27 @@ async fn atm_atmd_tmux_end_to_end() {
         "second attach should be a no-op for already-injected windows, \
          but ended up with {final_sidebar_count} sidebars"
     );
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn atm_atmd_tmux_end_to_end() {
+    let Some(env) = E2eEnv::try_setup().await else { return };
+
+    // Scenarios run sequentially against the shared fixture. Each
+    // scenario lives in its own async fn so a panic surfaces with that
+    // function's local frame instead of getting buried in a 500-LOC
+    // monolithic test body.
+    let session_id = scenario_protocol_e2e(&env).await;
+    scenario_atm_list_client(&env, &session_id).await;
+    scenario_real_tmux_lib(&env).await;
+
+    if python3_on_path().is_some() {
+        scenario_atm_spawn(&env).await;
+    } else {
+        eprintln!("SKIP scenario 4: python3 not on PATH (scenario 5 still runs)");
+    }
+
+    scenario_workspace_attach(&env).await;
 }
 
 #[derive(Debug)]
