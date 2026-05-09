@@ -22,6 +22,23 @@ use crate::error::{Result, TuiError};
 use crate::input::{ClientCommand, Event};
 use atm_protocol::{ClientMessage, DaemonMessage, ProtocolVersion};
 
+/// Default Unix socket path the daemon listens on.
+pub const DEFAULT_SOCKET_PATH: &str = "/tmp/atm.sock";
+
+/// Resolves the daemon socket path, honoring the `ATM_SOCKET` env var.
+///
+/// Mirrors `atmd`'s behavior so a daemon and its clients pointed at a
+/// non-default socket (test sandboxes, multi-tenant setups) stay in sync.
+///
+/// `ATM_SOCKET` set but empty is treated as unset — connecting to an
+/// empty path would just produce a confusing "No such file" error.
+pub fn resolve_socket_path() -> PathBuf {
+    std::env::var_os("ATM_SOCKET")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
+}
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -61,7 +78,7 @@ pub struct DaemonConfig {
 impl Default for DaemonConfig {
     fn default() -> Self {
         Self {
-            socket_path: PathBuf::from("/tmp/atm.sock"),
+            socket_path: resolve_socket_path(),
             retry_initial_delay: Duration::from_secs(1),
             retry_max_delay: Duration::from_secs(30),
             retry_multiplier: 2.0,
@@ -545,9 +562,17 @@ mod tests {
 
     #[test]
     fn test_daemon_config_default() {
+        // Branch on the env var so the assertion checks a concrete value
+        // either way, instead of tautologically mirroring the impl. The
+        // env-var override is also exercised end-to-end by the e2e
+        // harness.
         let config = DaemonConfig::default();
 
-        assert_eq!(config.socket_path, PathBuf::from("/tmp/atm.sock"));
+        let expected_socket = match std::env::var("ATM_SOCKET") {
+            Ok(s) if !s.is_empty() => PathBuf::from(s),
+            _ => PathBuf::from(DEFAULT_SOCKET_PATH),
+        };
+        assert_eq!(config.socket_path, expected_socket);
         assert_eq!(config.retry_initial_delay, Duration::from_secs(1));
         assert_eq!(config.retry_max_delay, Duration::from_secs(30));
         assert!((config.retry_multiplier - 2.0).abs() < f64::EPSILON);
@@ -617,7 +642,7 @@ mod tests {
 
         let client = DaemonClient::with_defaults(tx, cmd_rx, cancel_token);
 
-        assert_eq!(client.config.socket_path, PathBuf::from("/tmp/atm.sock"));
+        assert_eq!(client.config.socket_path, resolve_socket_path());
     }
 
     // ------------------------------------------------------------------------

@@ -20,10 +20,23 @@ pub struct RealTmuxClient {
     socket_name: Option<String>,
 }
 
+/// Environment variable read by [`RealTmuxClient::new`] to pick a non-default
+/// tmux socket label. Mirrors `ATM_SOCKET` for the daemon side: lets test
+/// harnesses redirect every tmux call an `atm` process makes to a private
+/// `tmux -L <label>` server without modifying call sites.
+pub const TMUX_SOCKET_ENV: &str = "ATM_TMUX_SOCKET";
+
 impl RealTmuxClient {
-    /// Creates a new client that uses the default tmux server.
+    /// Creates a new client.
+    ///
+    /// If the [`TMUX_SOCKET_ENV`] environment variable is set, the client
+    /// targets that tmux socket label (`tmux -L <label>`). Otherwise it
+    /// uses the default tmux server.
     pub fn new() -> Self {
-        Self::default()
+        match std::env::var(TMUX_SOCKET_ENV) {
+            Ok(label) if !label.is_empty() => Self::with_socket(label),
+            _ => Self::default(),
+        }
     }
 
     /// Creates a client targeting a specific tmux server socket.
@@ -258,9 +271,44 @@ impl TmuxClient for RealTmuxClient {
 mod tests {
     use super::*;
 
+    /// RAII guard that restores an env var's prior value on drop, even
+    /// during unwinding. Necessary because `RealTmuxClient::new()` reads
+    /// `TMUX_SOCKET_ENV` from process-global state — a panic mid-test
+    /// would otherwise leak the mutated value into other tests.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                prev: std::env::var_os(key),
+            }
+        }
+        fn set(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+        fn unset(&self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
     #[test]
-    fn test_real_client_default_no_socket() {
-        let client = RealTmuxClient::new();
+    fn test_real_client_explicit_default_has_no_socket() {
+        // `default()` is deterministic — unlike `new()`, it never reads
+        // env vars. Use it whenever a test wants the no-socket variant.
+        let client = RealTmuxClient::default();
         assert!(client.socket_name.is_none());
     }
 
@@ -268,5 +316,31 @@ mod tests {
     fn test_real_client_with_socket() {
         let client = RealTmuxClient::with_socket("test-server");
         assert_eq!(client.socket_name.as_deref(), Some("test-server"));
+    }
+
+    /// All env-var cases for `new()` live in one `#[test]` so they don't
+    /// race each other under parallel test execution.
+    #[test]
+    fn test_real_client_new_honors_env() {
+        let env = EnvGuard::capture(TMUX_SOCKET_ENV);
+
+        env.set("custom-server");
+        assert_eq!(
+            RealTmuxClient::new().socket_name.as_deref(),
+            Some("custom-server"),
+            "TMUX_SOCKET_ENV value should be picked up"
+        );
+
+        env.set("");
+        assert!(
+            RealTmuxClient::new().socket_name.is_none(),
+            "empty env should fall through to default"
+        );
+
+        env.unset();
+        assert!(
+            RealTmuxClient::new().socket_name.is_none(),
+            "unset env should give the no-socket default"
+        );
     }
 }
