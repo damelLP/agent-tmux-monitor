@@ -527,11 +527,11 @@ async fn run_event_loop(
                                             .unwrap_or("%0");
                                         // Query the target pane's cwd for the new agent
                                         let cwd = client.get_pane_cwd(target).await.ok().flatten();
-                                        let mut cmd = "claude".to_string();
-                                        if let Some(ref dir) = cwd {
-                                            let escaped = dir.replace('\'', "'\\''");
-                                            cmd = format!("cd '{escaped}' && {cmd}");
-                                        }
+                                        // Same builder cmd_spawn uses, so the
+                                        // TUI keyboard shortcut and the
+                                        // `atm spawn` subcommand stay in sync —
+                                        // including ATM_SPAWN_BIN.
+                                        let cmd = build_spawn_command(cwd.as_deref(), None);
                                         // Split without a command to get an interactive shell
                                         // (ensures claude is on PATH), then send-keys.
                                         match client
@@ -634,11 +634,15 @@ async fn run_event_loop(
 // ============================================================================
 
 fn get_log_dir() -> Option<PathBuf> {
-    if let Ok(xdg_state) = std::env::var("XDG_STATE_HOME") {
+    if let Some(xdg_state) = std::env::var("XDG_STATE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
         return Some(PathBuf::from(xdg_state).join("atm"));
     }
     std::env::var("HOME")
         .ok()
+        .filter(|s| !s.is_empty())
         .map(|home| PathBuf::from(home).join(".local/state/atm"))
 }
 
@@ -665,19 +669,9 @@ fn create_log_file() -> Option<std::fs::File> {
 // CLI Command Implementations
 // ============================================================================
 
-/// Resolves the daemon socket path, honoring `$ATM_SOCKET` so a user
-/// can run an isolated test daemon (and a matching atm TUI) without
-/// stomping on the system-wide one at `/tmp/atm.sock`. Mirrors the
-/// behaviour of `atmd` and the `atm-hook` bash script.
-fn daemon_socket_path() -> PathBuf {
-    std::env::var("ATM_SOCKET")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/tmp/atm.sock"))
-}
-
 /// Fetches the current session list from the daemon via one-shot connection.
 async fn fetch_sessions() -> Result<Vec<SessionView>> {
-    let socket_path = daemon_socket_path();
+    let socket_path = atm_tui::client::resolve_socket_path();
 
     let stream = UnixStream::connect(&socket_path)
         .await
@@ -784,6 +778,59 @@ fn resolve_pane_id(sessions: &[SessionView], target: &str) -> Result<String> {
     }
 }
 
+/// POSIX shell-quote `s` by single-quoting and escaping embedded `'`.
+/// Result is exactly one shell token regardless of spaces or specials.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Build the shell command string sent to a freshly-split tmux pane.
+///
+/// Honors two environment variables (both treat empty as unset):
+///
+/// - `ATM_SPAWN_BIN`: an absolute (or PATH-resolvable) path to the
+///   claude binary. Useful for wrapped installs (e.g. macOS app bundle
+///   at `/Applications/Claude Code.app/Contents/MacOS/claude`) and for
+///   integration tests that inject a fixture. The value is shell-quoted
+///   as one token, so spaces/specials in the path "just work."
+///
+/// - `ATM_SPAWN_ARGS`: extra arguments inserted *between* the bin and
+///   the appended `--model` flag. Use this for wrapper commands like
+///   `mise x claude` (`ATM_SPAWN_BIN=mise ATM_SPAWN_ARGS='x claude'`)
+///   or `env FOO=1 claude` (`ATM_SPAWN_BIN=env
+///   ATM_SPAWN_ARGS='FOO=1 claude'`). The value is interpolated
+///   *verbatim*, not re-quoted — that's the whole point, since the
+///   user's intent is multi-token. The user is responsible for quoting
+///   anything inside `ATM_SPAWN_ARGS` that needs to be one token (same
+///   contract as `bash -c "..."`).
+///
+/// `cwd` and `model` go through `shell_quote`, so a model name like
+/// `opus 4.5` or a cwd with spaces compose safely without the caller
+/// thinking about it.
+fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
+    let base = std::env::var("ATM_SPAWN_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "claude".to_string());
+    let mut cmd = shell_quote(&base);
+
+    if let Some(args) = std::env::var("ATM_SPAWN_ARGS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        cmd.push(' ');
+        cmd.push_str(args.trim());
+    }
+
+    if let Some(m) = model {
+        cmd.push_str(&format!(" --model {}", shell_quote(m)));
+    }
+    if let Some(dir) = cwd {
+        cmd = format!("cd {} && {cmd}", shell_quote(dir));
+    }
+    cmd
+}
+
 async fn cmd_spawn(
     model: Option<String>,
     worktree: Option<String>,
@@ -796,12 +843,6 @@ async fn cmd_spawn(
     }
 
     let client = RealTmuxClient::new();
-
-    // Build the claude command
-    let mut claude_cmd = String::from("claude");
-    if let Some(ref m) = model {
-        claude_cmd.push_str(&format!(" --model {m}"));
-    }
 
     // Get current pane to split from.
     // Prefer --target-pane (passed by tmux keybindings via #{pane_id}).
@@ -836,11 +877,7 @@ async fn cmd_spawn(
             })
     };
 
-    if let Some(ref dir) = cwd {
-        // Quote the path to handle spaces and special characters safely
-        let escaped = dir.replace('\'', "'\\''");
-        claude_cmd = format!("cd '{escaped}' && {claude_cmd}");
-    }
+    let claude_cmd = build_spawn_command(cwd.as_deref(), model.as_deref());
 
     let pane_dir: atm_tmux::PaneDirection = direction.into();
     // Split without a command so the pane gets an interactive shell (which has
@@ -1453,7 +1490,16 @@ fn install_new_window_hook(socket: &Option<String>, session_name: &str) -> Resul
 }
 
 /// Exec into `tmux attach-session` (replaces the current process on Unix).
+///
+/// Honors `ATM_NO_ATTACH=1`: skips the attach and returns Ok(()), which
+/// lets integration tests drive the workspace setup steps without
+/// blocking on a real terminal. Undocumented user-facing because the
+/// only sane reason to skip the attach is testing.
 fn exec_attach(socket: &Option<String>, session_name: &str) -> Result<()> {
+    if std::env::var("ATM_NO_ATTACH").is_ok_and(|v| v == "1") {
+        return Ok(());
+    }
+
     let mut cmd = std::process::Command::new("tmux");
     if let Some(ref s) = socket {
         cmd.arg("-L").arg(s);
@@ -1581,6 +1627,11 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
 
     // 9. Install resize hooks + prefix-R keybinding
     install_resize_hooks(&socket_name, &session_name)?;
+    // NOTE: divergence with `cmd_workspace_attach`, which also calls
+    // `install_new_window_hook` here. As written, a workspace created via
+    // `create` does not get sidebars injected into windows opened later
+    // (e.g., via prefix-c). Likely an oversight — both flows produce the
+    // same long-lived session and should hook the same events.
 
     // 10. Focus the agent pane and attach
     tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;
@@ -2021,5 +2072,140 @@ mod prompt_tests {
         let lines: Vec<String> = vec![];
         let prompt = extract_prompt(&lines);
         assert!(prompt.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod spawn_command_tests {
+    use super::build_spawn_command;
+
+    /// RAII guard that captures an env var's current value on construction
+    /// and restores it on drop (including during unwinding from a failed
+    /// assertion). Without this, a mid-test panic would leak the
+    /// mutated value into later tests in the same binary.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                prev: std::env::var_os(key),
+            }
+        }
+        fn set(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+        fn unset(&self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// One single `#[test]`, because all the cases mutate process-global
+    /// env vars (`ATM_SPAWN_BIN` and `ATM_SPAWN_ARGS`), and Rust's
+    /// default test runner runs tests in parallel. Splitting would race.
+    /// (`serial_test` would solve that but isn't worth a dep just here.)
+    #[test]
+    fn build_spawn_command_cases() {
+        let bin = EnvGuard::capture("ATM_SPAWN_BIN");
+        let args = EnvGuard::capture("ATM_SPAWN_ARGS");
+
+        // Start clean — captured `bin` and `args` will be restored on
+        // drop regardless of which scenarios run/panic below.
+        bin.unset();
+        args.unset();
+
+        // 1. Unset env → default to single-quoted "claude".
+        //    `'claude'` is identical to bare `claude` for execve;
+        //    quoting just removes shell-parsing surprises elsewhere.
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 2. Empty value is treated as unset.
+        bin.set("");
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 3. Path containing a space is single-quoted, so the pane's
+        //    shell sees one token instead of re-tokenizing on space.
+        bin.set("/Applications/Claude Code.app/Contents/MacOS/claude");
+        assert_eq!(
+            build_spawn_command(None, None),
+            "'/Applications/Claude Code.app/Contents/MacOS/claude'"
+        );
+
+        // 4. Embedded single-quote is escaped via the standard POSIX
+        //    trick: close-quote, escape literal, reopen.
+        bin.set("/path/it's/claude");
+        assert_eq!(build_spawn_command(None, None), "'/path/it'\\''s/claude'");
+
+        // 5. Cwd and model compose around the quoted command.
+        bin.unset();
+        assert_eq!(
+            build_spawn_command(Some("/work/dir"), Some("opus")),
+            "cd '/work/dir' && 'claude' --model 'opus'"
+        );
+
+        // 6. Model containing a space is quoted, so the pane's shell
+        //    treats it as a single argument value to `--model`.
+        assert_eq!(
+            build_spawn_command(None, Some("opus 4.5")),
+            "'claude' --model 'opus 4.5'"
+        );
+
+        // 7. Cwd with a single quote in it composes safely too.
+        assert_eq!(
+            build_spawn_command(Some("/work/it's"), None),
+            "cd '/work/it'\\''s' && 'claude'"
+        );
+
+        // ----- ATM_SPAWN_ARGS -----
+
+        // 8. ATM_SPAWN_ARGS interpolates verbatim between bin and any
+        //    appended `--model`. Wrapper-command UX:
+        //    `mise x claude --model opus`.
+        bin.set("mise");
+        args.set("x claude");
+        assert_eq!(
+            build_spawn_command(None, Some("opus")),
+            "'mise' x claude --model 'opus'"
+        );
+
+        // 9. `env FOO=1 claude` style.
+        bin.set("env");
+        args.set("FOO=1 claude");
+        assert_eq!(build_spawn_command(None, None), "'env' FOO=1 claude");
+
+        // 10. Empty ATM_SPAWN_ARGS is treated as unset (no extra
+        //     whitespace inserted).
+        bin.unset();
+        args.set("");
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 11. Surrounding whitespace in ATM_SPAWN_ARGS is trimmed so
+        //     copy-paste mistakes don't produce stray spaces.
+        bin.set("mise");
+        args.set("  x claude  ");
+        assert_eq!(build_spawn_command(None, None), "'mise' x claude");
+
+        // 12. With cwd, args sit between bin and model as expected.
+        bin.set("direnv");
+        args.set("exec . claude");
+        assert_eq!(
+            build_spawn_command(Some("/work/dir"), Some("opus")),
+            "cd '/work/dir' && 'direnv' exec . claude --model 'opus'"
+        );
+
+        // env's Drop restores the captured values, even if any of the
+        // assert_eq!s above panicked.
     }
 }
