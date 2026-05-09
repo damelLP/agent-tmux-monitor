@@ -1,0 +1,20 @@
+{
+  "name": "@atm/pi-hook",
+  "version": "0.2.2",
+  "description": "pi extension that forwards lifecycle events to the ATM daemon for monitoring in the ATM TUI",
+  "main": "atm-pi-hook.ts",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/damelLP/agent-tmux-manager.git",
+    "directory": "extensions/pi"
+  },
+  "keywords": ["pi", "atm", "tmux", "agent", "monitoring"],
+  "license": "MIT",
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
