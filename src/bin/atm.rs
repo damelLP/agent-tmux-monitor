@@ -786,27 +786,42 @@ fn shell_quote(s: &str) -> String {
 
 /// Build the shell command string sent to a freshly-split tmux pane.
 ///
-/// Honors `ATM_SPAWN_BIN`: an absolute (or PATH-resolvable) path to the
-/// claude binary. Useful for wrapped installs (e.g. macOS app bundle at
-/// `/Applications/Claude Code.app/Contents/MacOS/claude`) and for
-/// integration tests that inject a fixture. Empty is treated as unset.
+/// Honors two environment variables (both treat empty as unset):
 ///
-/// **Must be a single binary path, not a command line.** The value is
-/// shell-quoted as one token, so wrappers like `mise x claude` or
-/// `env FOO=1 claude` won't work — point the wrapper at a script
-/// instead and put the script's path in `ATM_SPAWN_BIN`. (Quoting is
-/// what keeps things like spaces in `/Applications/...` from
-/// re-tokenizing — we trade off "can run multi-token commands" for
-/// "spaces in paths just work.")
+/// - `ATM_SPAWN_BIN`: an absolute (or PATH-resolvable) path to the
+///   claude binary. Useful for wrapped installs (e.g. macOS app bundle
+///   at `/Applications/Claude Code.app/Contents/MacOS/claude`) and for
+///   integration tests that inject a fixture. The value is shell-quoted
+///   as one token, so spaces/specials in the path "just work."
 ///
-/// All interpolated values (binary path, cwd, model) are shell-quoted,
-/// so a model name like `opus 4.5` or a cwd with spaces compose safely.
+/// - `ATM_SPAWN_ARGS`: extra arguments inserted *between* the bin and
+///   the appended `--model` flag. Use this for wrapper commands like
+///   `mise x claude` (`ATM_SPAWN_BIN=mise ATM_SPAWN_ARGS='x claude'`)
+///   or `env FOO=1 claude` (`ATM_SPAWN_BIN=env
+///   ATM_SPAWN_ARGS='FOO=1 claude'`). The value is interpolated
+///   *verbatim*, not re-quoted — that's the whole point, since the
+///   user's intent is multi-token. The user is responsible for quoting
+///   anything inside `ATM_SPAWN_ARGS` that needs to be one token (same
+///   contract as `bash -c "..."`).
+///
+/// `cwd` and `model` go through `shell_quote`, so a model name like
+/// `opus 4.5` or a cwd with spaces compose safely without the caller
+/// thinking about it.
 fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
     let base = std::env::var("ATM_SPAWN_BIN")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claude".to_string());
     let mut cmd = shell_quote(&base);
+
+    if let Some(args) = std::env::var("ATM_SPAWN_ARGS")
+        .ok()
+        .filter(|s| !s.is_empty())
+    {
+        cmd.push(' ');
+        cmd.push_str(args.trim());
+    }
+
     if let Some(m) = model {
         cmd.push_str(&format!(" --model {}", shell_quote(m)));
     }
@@ -2097,27 +2112,32 @@ mod spawn_command_tests {
         }
     }
 
-    /// One single `#[test]`, because all the cases mutate the
-    /// `ATM_SPAWN_BIN` process-global env var and Rust's default
-    /// test runner runs tests in parallel. Splitting would race.
+    /// One single `#[test]`, because all the cases mutate process-global
+    /// env vars (`ATM_SPAWN_BIN` and `ATM_SPAWN_ARGS`), and Rust's
+    /// default test runner runs tests in parallel. Splitting would race.
     /// (`serial_test` would solve that but isn't worth a dep just here.)
     #[test]
     fn build_spawn_command_cases() {
-        let env = EnvGuard::capture("ATM_SPAWN_BIN");
+        let bin = EnvGuard::capture("ATM_SPAWN_BIN");
+        let args = EnvGuard::capture("ATM_SPAWN_ARGS");
+
+        // Start clean — captured `bin` and `args` will be restored on
+        // drop regardless of which scenarios run/panic below.
+        bin.unset();
+        args.unset();
 
         // 1. Unset env → default to single-quoted "claude".
         //    `'claude'` is identical to bare `claude` for execve;
         //    quoting just removes shell-parsing surprises elsewhere.
-        env.unset();
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
         // 2. Empty value is treated as unset.
-        env.set("");
+        bin.set("");
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
         // 3. Path containing a space is single-quoted, so the pane's
         //    shell sees one token instead of re-tokenizing on space.
-        env.set("/Applications/Claude Code.app/Contents/MacOS/claude");
+        bin.set("/Applications/Claude Code.app/Contents/MacOS/claude");
         assert_eq!(
             build_spawn_command(None, None),
             "'/Applications/Claude Code.app/Contents/MacOS/claude'"
@@ -2125,11 +2145,11 @@ mod spawn_command_tests {
 
         // 4. Embedded single-quote is escaped via the standard POSIX
         //    trick: close-quote, escape literal, reopen.
-        env.set("/path/it's/claude");
+        bin.set("/path/it's/claude");
         assert_eq!(build_spawn_command(None, None), "'/path/it'\\''s/claude'");
 
         // 5. Cwd and model compose around the quoted command.
-        env.unset();
+        bin.unset();
         assert_eq!(
             build_spawn_command(Some("/work/dir"), Some("opus")),
             "cd '/work/dir' && 'claude' --model 'opus'"
@@ -2148,7 +2168,44 @@ mod spawn_command_tests {
             "cd '/work/it'\\''s' && 'claude'"
         );
 
-        // env's Drop restores the captured value, even if any of the
+        // ----- ATM_SPAWN_ARGS -----
+
+        // 8. ATM_SPAWN_ARGS interpolates verbatim between bin and any
+        //    appended `--model`. Wrapper-command UX:
+        //    `mise x claude --model opus`.
+        bin.set("mise");
+        args.set("x claude");
+        assert_eq!(
+            build_spawn_command(None, Some("opus")),
+            "'mise' x claude --model 'opus'"
+        );
+
+        // 9. `env FOO=1 claude` style.
+        bin.set("env");
+        args.set("FOO=1 claude");
+        assert_eq!(build_spawn_command(None, None), "'env' FOO=1 claude");
+
+        // 10. Empty ATM_SPAWN_ARGS is treated as unset (no extra
+        //     whitespace inserted).
+        bin.unset();
+        args.set("");
+        assert_eq!(build_spawn_command(None, None), "'claude'");
+
+        // 11. Surrounding whitespace in ATM_SPAWN_ARGS is trimmed so
+        //     copy-paste mistakes don't produce stray spaces.
+        bin.set("mise");
+        args.set("  x claude  ");
+        assert_eq!(build_spawn_command(None, None), "'mise' x claude");
+
+        // 12. With cwd, args sit between bin and model as expected.
+        bin.set("direnv");
+        args.set("exec . claude");
+        assert_eq!(
+            build_spawn_command(Some("/work/dir"), Some("opus")),
+            "cd '/work/dir' && 'direnv' exec . claude --model 'opus'"
+        );
+
+        // env's Drop restores the captured values, even if any of the
         // assert_eq!s above panicked.
     }
 }
