@@ -2049,31 +2049,60 @@ mod prompt_tests {
 mod spawn_command_tests {
     use super::build_spawn_command;
 
-    /// One single test, because all the cases mutate the
+    /// RAII guard that captures an env var's current value on construction
+    /// and restores it on drop (including during unwinding from a failed
+    /// assertion). Without this, a mid-test panic would leak the
+    /// mutated value into later tests in the same binary.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl EnvGuard {
+        fn capture(key: &'static str) -> Self {
+            Self {
+                key,
+                prev: std::env::var_os(key),
+            }
+        }
+        fn set(&self, value: &str) {
+            std::env::set_var(self.key, value);
+        }
+        fn unset(&self) {
+            std::env::remove_var(self.key);
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var(self.key, v),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+
+    /// One single `#[test]`, because all the cases mutate the
     /// `ATM_SPAWN_COMMAND` process-global env var and Rust's default
-    /// test runner runs tests in parallel. Splitting into multiple
-    /// `#[test]`s would race. (`serial_test` would solve this but
-    /// isn't worth a dep just for one helper.)
+    /// test runner runs tests in parallel. Splitting would race.
+    /// (`serial_test` would solve that but isn't worth a dep just here.)
     #[test]
     fn build_spawn_command_cases() {
-        let saved = std::env::var_os("ATM_SPAWN_COMMAND");
+        let env = EnvGuard::capture("ATM_SPAWN_COMMAND");
 
         // 1. Unset env → default to single-quoted "claude".
         //    `'claude'` is identical to bare `claude` for execve;
         //    quoting just removes shell-parsing surprises elsewhere.
-        std::env::remove_var("ATM_SPAWN_COMMAND");
+        env.unset();
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
         // 2. Empty value is treated as unset (the round-2 fix).
-        std::env::set_var("ATM_SPAWN_COMMAND", "");
+        env.set("");
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
         // 3. Path containing a space is single-quoted, so the pane's
         //    shell sees one token instead of re-tokenizing on space.
-        std::env::set_var(
-            "ATM_SPAWN_COMMAND",
-            "/Applications/Claude Code.app/Contents/MacOS/claude",
-        );
+        env.set("/Applications/Claude Code.app/Contents/MacOS/claude");
         assert_eq!(
             build_spawn_command(None, None),
             "'/Applications/Claude Code.app/Contents/MacOS/claude'"
@@ -2081,24 +2110,20 @@ mod spawn_command_tests {
 
         // 4. Embedded single-quote is escaped via the standard POSIX
         //    trick: close-quote, escape literal, reopen.
-        std::env::set_var("ATM_SPAWN_COMMAND", "/path/it's/claude");
+        env.set("/path/it's/claude");
         assert_eq!(
             build_spawn_command(None, None),
             "'/path/it'\\''s/claude'"
         );
 
         // 5. Cwd and model compose around the quoted command.
-        std::env::remove_var("ATM_SPAWN_COMMAND");
+        env.unset();
         assert_eq!(
             build_spawn_command(Some("/work/dir"), Some("opus")),
             "cd '/work/dir' && 'claude' --model opus"
         );
 
-        // Restore (matters if the dev shell has it set).
-        if let Some(prev) = saved {
-            std::env::set_var("ATM_SPAWN_COMMAND", prev);
-        } else {
-            std::env::remove_var("ATM_SPAWN_COMMAND");
-        }
+        // env's Drop restores the captured value, even if any of the
+        // assert_eq!s above panicked.
     }
 }
