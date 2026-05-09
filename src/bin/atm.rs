@@ -1619,7 +1619,7 @@ fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
                 Some((ts, name))
             })
             .collect();
-        sessions.sort_by(|a, b| b.0.cmp(&a.0)); // most recent first
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.0)); // most recent first
         let session_name = sessions
             .into_iter()
             .next()
