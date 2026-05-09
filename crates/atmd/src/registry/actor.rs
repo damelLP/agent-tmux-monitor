@@ -401,6 +401,11 @@ impl RegistryActor {
             AgentType::GeneralPurpose, // Will be updated when status line arrives
             Model::Unknown,            // Will be updated when status line arrives
         );
+        // Today the discoverer scans /proc for `comm == "claude"` only,
+        // so any session that lands here is Claude. When `hfv` (the
+        // pluggable Discoverer trait) lands, this needs to come from
+        // whichever discoverer found the process. For now, hardcode.
+        session.harness = atm_core::Harness::ClaudeCode;
         // Resolve project/worktree from working directory.
         // Note: these are local stat() calls walking up ~5 dirs (~5μs),
         // acceptable inline per Tokio guidelines for sub-100μs sync work.
