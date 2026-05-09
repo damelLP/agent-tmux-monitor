@@ -62,7 +62,7 @@ pub enum PiEventType {
     UserBash,
     Input,
 
-    // === Synthetic events emitted by `@atm/pi-hook` ===
+    // === Synthetic events emitted by `pi-atm` ===
     //
     // Pi has no event for "ctx.ui.select dialog opened" — the only way
     // a passive observer can detect that pi is awaiting user permission

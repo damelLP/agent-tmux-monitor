@@ -7,7 +7,7 @@
 //!
 //! Pi is a coding agent (<https://pi.dev/>, npm package
 //! `@mariozechner/pi-coding-agent`) that exposes a TypeScript extension
-//! API. ATM's pi adapter is a TypeScript extension (`@atm/pi-hook`,
+//! API. ATM's pi adapter is a TypeScript extension (`pi-atm`,
 //! tracked by bead `agent-tmux-manager-6dx`) that subscribes to pi's
 //! `pi.on(eventName, handler)` events and forwards them to atmd over
 //! the existing Unix socket. The Rust types in this crate describe the

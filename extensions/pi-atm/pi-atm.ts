@@ -1,5 +1,5 @@
 /**
- * @atm/pi-hook — pi extension that forwards pi events to atmd for
+ * pi-atm — pi extension that forwards pi events to atmd for
  * monitoring in the ATM TUI.
  *
  * Symmetric counterpart to the bash `atm-hook` script that forwards
@@ -11,11 +11,11 @@
  * and applies the resulting LifecycleEvent to the session registry.
  *
  * Run:
- *   pi --extension /abs/path/to/atm-pi-hook.ts
+ *   pi --extension /abs/path/to/pi-atm.ts
  *
  * Config (env):
  *   ATM_SOCKET   — daemon socket path (default: /tmp/atm.sock)
- *   ATM_DEBUG=1  — append debug log to /tmp/atm-pi-hook.log
+ *   ATM_DEBUG=1  — append debug log to /tmp/pi-atm.log
  *
  * NEVER throws or rejects — the contract is "if atmd is unavailable,
  * pi keeps working". All failures are swallowed (and optionally logged
@@ -60,7 +60,7 @@ const FORWARDED_EVENTS = [
 function logDebug(msg: string): void {
 	if (!DEBUG) return;
 	try {
-		fs.appendFileSync("/tmp/atm-pi-hook.log", `${new Date().toISOString()} ${msg}\n`);
+		fs.appendFileSync("/tmp/pi-atm.log", `${new Date().toISOString()} ${msg}\n`);
 	} catch {
 		// Logging is best-effort.
 	}
@@ -100,7 +100,7 @@ function openSocket(): void {
 		const connectMsg = {
 			protocol_version: { major: 1, minor: 0 },
 			type: "connect",
-			client_id: `pi-hook-${process.pid}`,
+			client_id: `pi-atm-${process.pid}`,
 		};
 		sock.write(`${JSON.stringify(connectMsg)}\n`);
 		// Drain anything that queued while we were connecting.
@@ -243,7 +243,7 @@ function patchUiSelectOnce(ctx: unknown, sessionId: string | undefined): void {
 }
 
 export default function (pi: ExtensionAPI): void {
-	logDebug(`atm-pi-hook starting, socket=${SOCKET}`);
+	logDebug(`pi-atm starting, socket=${SOCKET}`);
 
 	// `sessionManager.currentSessionId` only becomes available after
 	// `session_start` fires. Cache it from the first event we see.

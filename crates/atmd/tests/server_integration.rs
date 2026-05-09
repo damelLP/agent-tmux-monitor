@@ -1019,7 +1019,7 @@ async fn test_e2e_pi_context_event_drives_cost_and_token_display() {
 
 #[tokio::test]
 async fn test_e2e_pi_atm_needs_input_open_drives_attention_needed() {
-    // Synthetic event the @atm/pi-hook extension emits when it
+    // Synthetic event the pi-atm extension emits when it
     // intercepts a `ctx.ui.select(...)` call (e.g. pi-amplike's
     // bash permission gate). This is the load-bearing finding from
     // the spike encoded as runtime instrumentation.

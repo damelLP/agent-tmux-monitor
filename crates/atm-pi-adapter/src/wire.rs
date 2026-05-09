@@ -14,7 +14,7 @@ use crate::event::PiEventType;
 
 /// Wire envelope: pi extension forwards `{event, payload}` per event.
 ///
-/// This is what the TS extension (`@atm/pi-hook`, bead
+/// This is what the TS extension (`pi-atm`, bead
 /// `agent-tmux-manager-6dx`) sends to atmd over the existing Unix
 /// socket protocol.
 #[derive(Debug, Clone, Deserialize)]

@@ -171,7 +171,7 @@ impl RawPiEvent {
                 model: p.model.clone(),
             },
 
-            // Synthetic events emitted by `@atm/pi-hook` when it detects
+            // Synthetic events emitted by `pi-atm` when it detects
             // a `ctx.ui.select(...)` dialog opened/closed in any
             // extension (most often pi-amplike's permission gate).
             // This is the load-bearing finding from the spike encoded
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn atm_needs_input_open_becomes_needs_input_permission_prompt() {
-        // Emitted by @atm/pi-hook when ctx.ui.select(...) is called
+        // Emitted by pi-atm when ctx.ui.select(...) is called
         // (e.g. pi-amplike's bash permission gate).
         let e = raw(PiEventType::AtmNeedsInputOpen, PiPayload::default());
         assert_eq!(
