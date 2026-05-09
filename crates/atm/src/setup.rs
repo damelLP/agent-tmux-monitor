@@ -1,7 +1,15 @@
-//! Hook configuration for Claude Code integration
+//! Setup for ATM integrations across coding-agent harnesses.
 //!
-//! Manages installation and removal of atm hooks in Claude Code settings.
-//! Also handles installing the atm-hook script to ~/.local/bin/.
+//! Detects which harnesses are installed (Claude Code, pi, future) and
+//! wires the matching hook for each:
+//!
+//! - **Claude Code**: writes the `atm-hook` bash script to
+//!   `~/.local/bin/`, then registers it in `~/.claude/settings.json`'s
+//!   `hooks` and `statusLine` blocks.
+//! - **pi** (<https://pi.dev/>): writes the `pi-atm` TypeScript
+//!   extension to `~/.pi/packages/pi-atm/`, then adds
+//!   `"packages/pi-atm"` to `~/.pi/agent/settings.json`'s `packages`
+//!   array. Mirrors how pi-amplike documents local-dev installs.
 
 use std::fs;
 #[cfg(unix)]
@@ -11,8 +19,18 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
 
-/// The atm-hook script content, embedded at compile time.
+/// The atm-hook bash script content (Claude Code), embedded at compile time.
 const ATM_HOOK_SCRIPT: &str = include_str!("../scripts/atm-hook");
+
+/// The pi-atm TypeScript extension content, embedded at compile time.
+/// pi loads `.ts` files directly via `@mariozechner/jiti`.
+const PI_ATM_EXTENSION: &str =
+    include_str!("../../../extensions/pi-atm/extensions/pi-atm.ts");
+
+/// Package manifest written next to the embedded extension. Pi looks
+/// at the `pi.extensions` array (not `main`) to discover extension
+/// files within an installed package.
+const PI_ATM_PACKAGE_JSON: &str = include_str!("../../../extensions/pi-atm/package.json");
 
 /// All valid Claude Code hook types.
 /// See: https://docs.anthropic.com/en/docs/claude-code/hooks
@@ -229,6 +247,140 @@ bind C-s display-popup -E -w 35% -h 100% -x 0 "atm"
     Ok(())
 }
 
+// ============================================================================
+// Harness detection
+// ============================================================================
+
+/// True if Claude Code appears to be installed for this user.
+///
+/// We treat the existence of `~/.claude/` as authoritative — Claude
+/// creates this directory on first run regardless of where its
+/// binary lives.
+fn detect_claude_code() -> bool {
+    dirs::home_dir()
+        .map(|h| h.join(".claude").exists())
+        .unwrap_or(false)
+}
+
+/// True if pi appears to be installed for this user.
+///
+/// pi creates `~/.pi/agent/` on first run. Checking the directory
+/// avoids depending on a particular install location for the binary
+/// (npm global / nvm version / etc).
+fn detect_pi() -> bool {
+    dirs::home_dir()
+        .map(|h| h.join(".pi/agent").exists())
+        .unwrap_or(false)
+}
+
+// ============================================================================
+// pi setup
+// ============================================================================
+
+/// Path under which we install the embedded `pi-atm` extension.
+///
+/// Pi resolves the `"packages/<name>"` settings entry relative to its
+/// `agentDir` (`~/.pi/agent/`, not `~/.pi/`) — verified against
+/// `package-manager.js`'s `globalBaseDir = this.agentDir` and
+/// `agentDir = ~/.pi/agent`. So the install path is
+/// `~/.pi/agent/packages/<name>/`.
+fn pi_atm_package_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi/agent/packages/pi-atm"))
+}
+
+/// Path to pi's settings file.
+fn pi_settings_path() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pi").join("agent").join("settings.json"))
+}
+
+/// Reads pi's settings.json. Returns an empty object if not present.
+fn read_pi_settings() -> Result<Value> {
+    let path = pi_settings_path().context("Could not determine home directory")?;
+    if !path.exists() {
+        return Ok(json!({}));
+    }
+    let content =
+        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+    serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+fn write_pi_settings(settings: &Value) -> Result<()> {
+    let path = pi_settings_path().context("Could not determine home directory")?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let content = serde_json::to_string_pretty(settings)?;
+    fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// Writes the embedded pi-atm extension files to
+/// `~/.pi/packages/pi-atm/` (overwriting if present), then ensures
+/// `"packages/pi-atm"` is in pi's settings `packages` array.
+///
+/// Returns `(files_written, settings_changed)` for caller's success
+/// message.
+fn install_pi_extension() -> Result<(bool, bool)> {
+    let pkg_dir = pi_atm_package_dir().context("Could not determine home directory")?;
+    let extensions_dir = pkg_dir.join("extensions");
+    fs::create_dir_all(&extensions_dir)
+        .with_context(|| format!("Failed to create {}", extensions_dir.display()))?;
+
+    // Layout matches pi-amplike: package.json with pi.extensions
+    // pointing at ./extensions/, and the .ts file inside.
+    let ts_path = extensions_dir.join("pi-atm.ts");
+    let pkg_path = pkg_dir.join("package.json");
+
+    // Always write to refresh any in-place edits the user might have made.
+    fs::write(&ts_path, PI_ATM_EXTENSION)
+        .with_context(|| format!("Failed to write {}", ts_path.display()))?;
+    fs::write(&pkg_path, PI_ATM_PACKAGE_JSON)
+        .with_context(|| format!("Failed to write {}", pkg_path.display()))?;
+
+    // Update pi's settings.json packages array.
+    let mut settings = read_pi_settings()?;
+    if settings.get("packages").is_none() {
+        settings["packages"] = json!([]);
+    }
+    let packages = settings["packages"]
+        .as_array_mut()
+        .context("packages is not an array in pi settings.json")?;
+
+    // Pi's local-package format: "packages/<name>" (relative to ~/.pi/).
+    let entry = Value::String("packages/pi-atm".to_string());
+    let already_present = packages.iter().any(|v| v == &entry);
+    if !already_present {
+        packages.push(entry);
+        write_pi_settings(&settings)?;
+        Ok((true, true))
+    } else {
+        Ok((true, false))
+    }
+}
+
+/// Removes the pi-atm extension from `~/.pi/packages/` and from pi's
+/// settings.json.
+fn uninstall_pi_extension() -> Result<bool> {
+    let mut changed = false;
+    if let Some(pkg_dir) = pi_atm_package_dir() {
+        if pkg_dir.exists() {
+            fs::remove_dir_all(&pkg_dir)
+                .with_context(|| format!("Failed to remove {}", pkg_dir.display()))?;
+            changed = true;
+        }
+    }
+    let mut settings = read_pi_settings()?;
+    if let Some(packages) = settings.get_mut("packages").and_then(|p| p.as_array_mut()) {
+        let before = packages.len();
+        packages.retain(|v| v.as_str() != Some("packages/pi-atm"));
+        if packages.len() < before {
+            write_pi_settings(&settings)?;
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
 /// Removes the atm-hook script from ~/.local/bin/
 fn remove_hook_script() -> Result<bool> {
     let hook_path = hook_script_path();
@@ -242,18 +394,58 @@ fn remove_hook_script() -> Result<bool> {
     }
 }
 
-/// Installs atm hooks into Claude Code settings
+/// Installs atm integration for every detected coding-agent harness.
 pub fn setup() -> Result<()> {
     println!("Setting up ATM...\n");
 
-    // Step 1: Install the hook script
+    // Detect installed harnesses up-front so the user sees what
+    // will (and won't) be configured.
+    let claude = detect_claude_code();
+    let pi = detect_pi();
+
+    println!("Detected coding agents:");
+    println!(
+        "  {} Claude Code  (~/.claude/{})",
+        if claude { "✓" } else { "✗" },
+        if claude { "" } else { " not present" }
+    );
+    println!(
+        "  {} pi           (~/.pi/agent/{})",
+        if pi { "✓" } else { "✗" },
+        if pi { "" } else { " not present" }
+    );
+
+    if !claude && !pi {
+        println!("\nNo supported agent installations found. Install Claude Code or pi first.");
+        return Ok(());
+    }
+
+    if claude {
+        setup_claude_code()?;
+    }
+
+    if pi {
+        setup_pi()?;
+    }
+
+    // Step N: Install tmux keybindings (vendor-neutral).
+    println!();
+    install_tmux_bindings()?;
+
+    println!("\nNext step:");
+    println!("  Run: atm");
+
+    Ok(())
+}
+
+/// Wires `atm-hook` into Claude Code's `~/.claude/settings.json`.
+fn setup_claude_code() -> Result<()> {
+    println!("\nConfiguring Claude Code...");
     let hook_path = hook_script_path();
-    print!("Installing hook script to {}... ", hook_path.display());
+    print!("  Installing hook script to {}... ", hook_path.display());
     install_hook_script()?;
     println!("done");
 
-    // Step 2: Configure Claude Code settings
-    println!("\nConfiguring Claude Code hooks...");
     let mut settings = read_settings()?;
 
     // Ensure hooks object exists
@@ -275,46 +467,54 @@ pub fn setup() -> Result<()> {
             .context("hook type is not an array")?;
 
         if has_atm_hook(hooks_array) {
-            println!("  {hook_type} - already configured");
+            println!("    {hook_type} - already configured");
         } else {
             hooks_array.push(create_hook_entry(hook_type));
             added += 1;
-            println!("  {hook_type} - added");
+            println!("    {hook_type} - added");
         }
     }
 
-    // Step 3: Configure statusLine
-    println!("\nConfiguring statusLine...");
+    // statusLine
     let status_line_configured = if let Some(existing) = settings.get("statusLine") {
         if has_atm_status_line(existing) {
-            println!("  statusLine - already configured");
+            println!("    statusLine - already configured");
             false
         } else {
-            // Replace existing statusLine with atm-hook
             settings["statusLine"] = create_status_line_entry();
-            println!("  statusLine - updated to use atm-hook");
+            println!("    statusLine - updated to use atm-hook");
             true
         }
     } else {
         settings["statusLine"] = create_status_line_entry();
-        println!("  statusLine - added");
+        println!("    statusLine - added");
         true
     };
 
     if added > 0 || status_line_configured {
         write_settings(&settings)?;
-        println!("\nConfiguration complete!");
+        println!("  Claude Code configuration written.");
     } else {
-        println!("\nAll settings already configured.");
+        println!("  Claude Code already configured.");
     }
+    Ok(())
+}
 
-    // Step 4: Install tmux keybindings
-    println!();
-    install_tmux_bindings()?;
-
-    println!("\nNext step:");
-    println!("  Run: atm");
-
+/// Installs the `pi-atm` extension into `~/.pi/packages/pi-atm/` and
+/// registers it in pi's settings.json `packages` array.
+fn setup_pi() -> Result<()> {
+    println!("\nConfiguring pi...");
+    let (files_written, settings_changed) = install_pi_extension()?;
+    if files_written {
+        let pkg_dir = pi_atm_package_dir().unwrap_or_default();
+        println!("    pi-atm.ts written to {}", pkg_dir.display());
+    }
+    if settings_changed {
+        println!("    settings.json - added 'packages/pi-atm'");
+    } else {
+        println!("    settings.json - already references 'packages/pi-atm'");
+    }
+    println!("  pi configuration written.");
     Ok(())
 }
 
@@ -378,6 +578,16 @@ pub fn uninstall() -> Result<()> {
         println!("done");
     } else {
         println!("not found");
+    }
+
+    // Step 4: Uninstall pi-atm extension if present
+    if detect_pi() {
+        print!("\nRemoving pi-atm extension... ");
+        match uninstall_pi_extension() {
+            Ok(true) => println!("done"),
+            Ok(false) => println!("not present"),
+            Err(e) => println!("failed: {e}"),
+        }
     }
 
     println!("\nATM uninstalled successfully!");
