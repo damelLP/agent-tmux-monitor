@@ -29,8 +29,12 @@ pub const DEFAULT_SOCKET_PATH: &str = "/tmp/atm.sock";
 ///
 /// Mirrors `atmd`'s behavior so a daemon and its clients pointed at a
 /// non-default socket (test sandboxes, multi-tenant setups) stay in sync.
+///
+/// `ATM_SOCKET` set but empty is treated as unset — connecting to an
+/// empty path would just produce a confusing "No such file" error.
 pub fn resolve_socket_path() -> PathBuf {
     std::env::var_os("ATM_SOCKET")
+        .filter(|v| !v.is_empty())
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_SOCKET_PATH))
 }
