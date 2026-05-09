@@ -18,7 +18,7 @@
 //! 4. **`atm spawn` with a `claude` fixture**: run the actual `atm spawn`
 //!    subcommand against our isolated tmux server (via `ATM_TMUX_SOCKET`),
 //!    using a Python shim injected by absolute path through
-//!    `ATM_SPAWN_COMMAND`. (Earlier iterations tried prepending the
+//!    `ATM_SPAWN_BIN`. (Earlier iterations tried prepending the
 //!    shim dir to `PATH`, but interactive shell init re-derives `PATH`
 //!    from scratch and dropped the prepended dir. Absolute-path
 //!    injection sidesteps that entirely.) The shim connects to atmd
@@ -134,10 +134,19 @@ fn python3_on_path() -> Option<PathBuf> {
 /// and `$TMUX_PANE`, then sleep. Any error is logged to stderr and the
 /// shim exits non-zero so tmux's pane keeps the error visible for
 /// debugging.
+///
+/// The protocol version is templated in from `ProtocolVersion::CURRENT`
+/// so a major/minor bump in atm-protocol won't silently break this
+/// scenario with a confusing "version mismatch" reject.
 fn write_claude_shim(dir: &Path) -> PathBuf {
     let path = dir.join("claude");
-    let body = r#"#!/usr/bin/env python3
+    let major = ProtocolVersion::CURRENT.major;
+    let minor = ProtocolVersion::CURRENT.minor;
+    let body = format!(
+        r#"#!/usr/bin/env python3
 import json, os, socket, sys, time, uuid
+
+PROTOCOL_VERSION = {{"major": {major}, "minor": {minor}}}
 
 socket_path = os.environ.get("ATM_SOCKET", "/tmp/atm.sock")
 pane = os.environ.get("TMUX_PANE", "")
@@ -158,26 +167,26 @@ try:
             raise RuntimeError("daemon closed connection")
         return json.loads(line.decode())
 
-    send({
-        "protocol_version": {"major": 1, "minor": 0},
+    send({{
+        "protocol_version": PROTOCOL_VERSION,
         "type": "connect",
         "client_id": "claude-fixture",
-    })
+    }})
     msg = recv()
     if msg.get("type") != "connected":
         raise RuntimeError("unexpected handshake response: " + json.dumps(msg))
 
-    send({
-        "protocol_version": {"major": 1, "minor": 0},
+    send({{
+        "protocol_version": PROTOCOL_VERSION,
         "type": "hook_event",
-        "data": {
+        "data": {{
             "session_id": session_id,
             "hook_event_name": "UserPromptSubmit",
             "pid": os.getpid(),
             "tmux_pane": pane,
             "prompt": "fixture probe",
-        },
-    })
+        }},
+    }})
 
     # Stay alive — atmd's stale-session reaper runs every 2s and would
     # remove this session if the registered PID exited.
@@ -186,7 +195,8 @@ try:
 except Exception as e:
     print("[claude-fixture] error: " + repr(e), file=sys.stderr, flush=True)
     sys.exit(1)
-"#;
+"#
+    );
     std::fs::write(&path, body).expect("write claude shim");
     use std::os::unix::fs::PermissionsExt;
     let mut perms = std::fs::metadata(&path).expect("stat shim").permissions();
@@ -205,7 +215,7 @@ except Exception as e:
 /// process — and from there into the shells running in panes the server
 /// creates. Scenario 4 uses this channel to hand the `claude` shim the
 /// `ATM_SOCKET` it needs to phone home to atmd. (The shim path itself is
-/// injected via `ATM_SPAWN_COMMAND` at the `atm spawn` invocation, not
+/// injected via `ATM_SPAWN_BIN` at the `atm spawn` invocation, not
 /// via tmux env, so PATH precedence isn't load-bearing here.)
 struct PrivateTmux {
     socket_label: String,
@@ -411,7 +421,7 @@ async fn atm_atmd_tmux_end_to_end() {
     let daemon = Daemon::spawn(&atmd_path).await;
 
     // Stage the `claude` shim. We invoke it by absolute path via
-    // ATM_SPAWN_COMMAND, so we don't need to fight the user's shell init
+    // ATM_SPAWN_BIN, so we don't need to fight the user's shell init
     // for PATH precedence.
     let shim_dir_guard = tempfile::tempdir().expect("create shim tempdir");
     let shim_path = write_claude_shim(shim_dir_guard.path());
@@ -626,7 +636,7 @@ async fn atm_atmd_tmux_end_to_end() {
         .env("ATM_TMUX_SOCKET", tmux_server.label())
         // Override the hardcoded "claude" command with our shim, by
         // absolute path so shell PATH precedence is irrelevant.
-        .env("ATM_SPAWN_COMMAND", &shim_path)
+        .env("ATM_SPAWN_BIN", &shim_path)
         // The shim talks back to *our* daemon over this socket.
         .env("ATM_SOCKET", &daemon.socket_path)
         // ensure_daemon_running reads PID file under XDG_STATE_HOME.
@@ -681,10 +691,20 @@ async fn atm_atmd_tmux_end_to_end() {
         if list_output.status.success() {
             if let Ok(parsed) = serde_json::from_slice::<Value>(&list_output.stdout) {
                 if let Some(arr) = parsed.as_array() {
+                    // Require BOTH `id` prefix and `tmux_pane` match.
+                    // The id prefix rules out user-process discoveries
+                    // from /proc; the tmux_pane match rules out unrelated
+                    // fixture sessions (defense in depth — atmd starts
+                    // fresh per test, but a future test that spawns
+                    // multiple shims could otherwise pick the wrong one).
                     if let Some(s) = arr.iter().find(|s| {
-                        s.get("id")
+                        let id_match = s.get("id")
                             .and_then(Value::as_str)
-                            .map_or(false, |id| id.starts_with("fixture-"))
+                            .map_or(false, |id| id.starts_with("fixture-"));
+                        let pane_match = s.get("tmux_pane")
+                            .and_then(Value::as_str)
+                            == Some(spawned_pane.as_str());
+                        id_match && pane_match
                     }) {
                         fixture_session = Some(s.clone());
                         break;

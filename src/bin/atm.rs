@@ -531,7 +531,7 @@ async fn run_event_loop(
                                         // Same builder cmd_spawn uses, so the
                                         // TUI keyboard shortcut and the
                                         // `atm spawn` subcommand stay in sync —
-                                        // including ATM_SPAWN_COMMAND.
+                                        // including ATM_SPAWN_BIN.
                                         let cmd = build_spawn_command(cwd.as_deref(), None);
                                         // Split without a command to get an interactive shell
                                         // (ensures claude is on PATH), then send-keys.
@@ -779,27 +779,40 @@ fn resolve_pane_id(sessions: &[SessionView], target: &str) -> Result<String> {
     }
 }
 
+/// POSIX shell-quote `s` by single-quoting and escaping embedded `'`.
+/// Result is exactly one shell token regardless of spaces or specials.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Build the shell command string sent to a freshly-split tmux pane.
 ///
-/// Honors `ATM_SPAWN_COMMAND` (escape hatch for wrapped/aliased claude
-/// installs and integration-test fixtures); empty is treated as unset.
-/// Single-quotes the command path so spaces/specials in things like
-/// `/Applications/Claude Code.app/...` don't re-tokenize when the
-/// pane's shell parses the resulting string. Quoting `claude` (the
-/// default) is harmless — PATH lookup is unaffected by quoting.
+/// Honors `ATM_SPAWN_BIN`: an absolute (or PATH-resolvable) path to the
+/// claude binary. Useful for wrapped installs (e.g. macOS app bundle at
+/// `/Applications/Claude Code.app/Contents/MacOS/claude`) and for
+/// integration tests that inject a fixture. Empty is treated as unset.
+///
+/// **Must be a single binary path, not a command line.** The value is
+/// shell-quoted as one token, so wrappers like `mise x claude` or
+/// `env FOO=1 claude` won't work — point the wrapper at a script
+/// instead and put the script's path in `ATM_SPAWN_BIN`. (Quoting is
+/// what keeps things like spaces in `/Applications/...` from
+/// re-tokenizing — we trade off "can run multi-token commands" for
+/// "spaces in paths just work.")
+///
+/// All interpolated values (binary path, cwd, model) are shell-quoted,
+/// so a model name like `opus 4.5` or a cwd with spaces compose safely.
 fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
-    let base = std::env::var("ATM_SPAWN_COMMAND")
+    let base = std::env::var("ATM_SPAWN_BIN")
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "claude".to_string());
-    let escaped_base = base.replace('\'', "'\\''");
-    let mut cmd = format!("'{escaped_base}'");
+    let mut cmd = shell_quote(&base);
     if let Some(m) = model {
-        cmd.push_str(&format!(" --model {m}"));
+        cmd.push_str(&format!(" --model {}", shell_quote(m)));
     }
     if let Some(dir) = cwd {
-        let escaped_dir = dir.replace('\'', "'\\''");
-        cmd = format!("cd '{escaped_dir}' && {cmd}");
+        cmd = format!("cd {} && {cmd}", shell_quote(dir));
     }
     cmd
 }
@@ -2083,12 +2096,12 @@ mod spawn_command_tests {
     }
 
     /// One single `#[test]`, because all the cases mutate the
-    /// `ATM_SPAWN_COMMAND` process-global env var and Rust's default
+    /// `ATM_SPAWN_BIN` process-global env var and Rust's default
     /// test runner runs tests in parallel. Splitting would race.
     /// (`serial_test` would solve that but isn't worth a dep just here.)
     #[test]
     fn build_spawn_command_cases() {
-        let env = EnvGuard::capture("ATM_SPAWN_COMMAND");
+        let env = EnvGuard::capture("ATM_SPAWN_BIN");
 
         // 1. Unset env → default to single-quoted "claude".
         //    `'claude'` is identical to bare `claude` for execve;
@@ -2096,7 +2109,7 @@ mod spawn_command_tests {
         env.unset();
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
-        // 2. Empty value is treated as unset (the round-2 fix).
+        // 2. Empty value is treated as unset.
         env.set("");
         assert_eq!(build_spawn_command(None, None), "'claude'");
 
@@ -2120,7 +2133,20 @@ mod spawn_command_tests {
         env.unset();
         assert_eq!(
             build_spawn_command(Some("/work/dir"), Some("opus")),
-            "cd '/work/dir' && 'claude' --model opus"
+            "cd '/work/dir' && 'claude' --model 'opus'"
+        );
+
+        // 6. Model containing a space is quoted, so the pane's shell
+        //    treats it as a single argument value to `--model`.
+        assert_eq!(
+            build_spawn_command(None, Some("opus 4.5")),
+            "'claude' --model 'opus 4.5'"
+        );
+
+        // 7. Cwd with a single quote in it composes safely too.
+        assert_eq!(
+            build_spawn_command(Some("/work/it's"), None),
+            "cd '/work/it'\\''s' && 'claude'"
         );
 
         // env's Drop restores the captured value, even if any of the
