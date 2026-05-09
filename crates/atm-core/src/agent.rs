@@ -10,8 +10,10 @@ use std::fmt;
 /// - Specialized subagents for exploration, planning, code review
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AgentType {
     /// General-purpose main agent
+    #[default]
     GeneralPurpose,
 
     /// Task/explore subagent for file exploration
@@ -65,12 +67,6 @@ impl AgentType {
             "file-search" | "file_search" | "filesearch" => Self::FileSearch,
             _ => Self::Custom(s.to_string()),
         }
-    }
-}
-
-impl Default for AgentType {
-    fn default() -> Self {
-        Self::GeneralPurpose
     }
 }
 

@@ -74,14 +74,15 @@ pub fn is_in_tmux() -> bool {
 /// jump_to_pane("%5")?;
 /// ```
 pub fn jump_to_pane(pane_id: &str) -> Result<(), TmuxError> {
+    // Validate pane ID before checking environment — an empty pane ID is
+    // invalid regardless of whether tmux is running.
+    if pane_id.is_empty() {
+        return Err(TmuxError::InvalidPaneId(pane_id.to_string()));
+    }
+
     // Validate we're in tmux
     if !is_in_tmux() {
         return Err(TmuxError::NotInTmux);
-    }
-
-    // Validate pane ID
-    if pane_id.is_empty() {
-        return Err(TmuxError::InvalidPaneId(pane_id.to_string()));
     }
 
     // Step 1: Get the pane's session and window information

@@ -318,9 +318,10 @@ pub(crate) enum MotionKind {
 }
 
 /// Internal DFA state.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 enum InputState {
     /// Waiting for input, no partial parse in progress.
+    #[default]
     Ready,
     /// Accumulating a numeric count prefix.
     Count(usize),
@@ -332,12 +333,6 @@ enum InputState {
     PendingO,
     /// Received a `z` prefix, waiting for a fold command (M/R/c/o/a).
     PendingZ,
-}
-
-impl Default for InputState {
-    fn default() -> Self {
-        Self::Ready
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -908,10 +903,7 @@ mod tests {
     fn test_zc_emits_close_fold() {
         let mut h = InputHandler::new();
         assert_eq!(h.handle(key(KeyCode::Char('z'))), None);
-        assert_eq!(
-            h.handle(key(KeyCode::Char('c'))),
-            Some(UiAction::CloseFold)
-        );
+        assert_eq!(h.handle(key(KeyCode::Char('c'))), Some(UiAction::CloseFold));
     }
 
     #[test]

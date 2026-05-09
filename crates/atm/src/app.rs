@@ -18,7 +18,7 @@ use std::collections::{HashMap, HashSet};
 // ============================================================================
 
 /// Connection state of the TUI to the daemon.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum AppState {
     /// Connected to daemon and receiving updates.
     Connected,
@@ -32,13 +32,8 @@ pub enum AppState {
     },
 
     /// Initial connection in progress.
+    #[default]
     Connecting,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::Connecting
-    }
 }
 
 // ============================================================================
@@ -209,7 +204,7 @@ impl App {
                     .filter(|s| {
                         s.tmux_pane
                             .as_ref()
-                            .map_or(false, |p| self.filter_pane_ids.contains(p))
+                            .is_some_and(|p| self.filter_pane_ids.contains(p))
                     })
                     .cloned()
                     .collect()
@@ -497,7 +492,7 @@ impl App {
     pub fn tick(&mut self) {
         self.tick_count = self.tick_count.wrapping_add(1);
         // Toggle blink every 5 ticks (500ms at 100ms tick rate)
-        if self.tick_count % 5 == 0 {
+        if self.tick_count.is_multiple_of(5) {
             self.blink_visible = !self.blink_visible;
         }
     }

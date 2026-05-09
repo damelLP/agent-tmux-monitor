@@ -26,7 +26,7 @@ pub fn resolve_project_root(working_dir: &str) -> Option<String> {
                     // Walk ancestors of the gitdir path to find the .git directory
                     if let Some(main_git) = Path::new(gitdir)
                         .ancestors()
-                        .find(|p| p.file_name().map_or(false, |n| n == ".git"))
+                        .find(|p| p.file_name().is_some_and(|n| n == ".git"))
                     {
                         if let Some(parent) = main_git.parent() {
                             return Some(parent.to_string_lossy().to_string());

@@ -517,8 +517,7 @@ async fn run_event_loop(
                                         let target = panes
                                             .iter()
                                             .filter(|p| {
-                                                current_session
-                                                    .is_none_or(|s| p.session_name == s)
+                                                current_session.is_none_or(|s| p.session_name == s)
                                                     && atm_pane.as_deref()
                                                         != Some(p.pane_id.as_str())
                                             })
@@ -1348,7 +1347,10 @@ fn install_resize_hooks(socket: &Option<String>, session_name: &str) -> Result<(
     )?;
     // NOTE: bind-key is global; the last workspace created wins for prefix-R.
     tmux_run(socket, &["bind-key", "-T", "prefix", "R", &hook_cmd])?;
-    tmux_run(socket, &["bind-key", "-T", "prefix", "a", "select-pane", "-t", "0"])?;
+    tmux_run(
+        socket,
+        &["bind-key", "-T", "prefix", "a", "select-pane", "-t", "0"],
+    )?;
     Ok(())
 }
 
@@ -1617,7 +1619,7 @@ fn cmd_workspace_attach(session: Option<String>, isolate: bool) -> Result<()> {
                 Some((ts, name))
             })
             .collect();
-        sessions.sort_by(|a, b| b.0.cmp(&a.0)); // most recent first
+        sessions.sort_by_key(|s| std::cmp::Reverse(s.0)); // most recent first
         let session_name = sessions
             .into_iter()
             .next()
