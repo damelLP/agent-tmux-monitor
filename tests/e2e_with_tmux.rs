@@ -205,7 +205,6 @@ except Exception as e:
     path
 }
 
-
 /// Owns a private tmux server scoped to this test (tmux `-L <socket>`).
 ///
 /// We pass this label to `RealTmuxClient::with_socket(...)` so the project's
@@ -236,11 +235,7 @@ impl PrivateTmux {
         Self::start_with_label_session_env(&socket_label, "probe", env)
     }
 
-    fn start_with_label_session_env<I, K, V>(
-        socket_label: &str,
-        session_name: &str,
-        env: I,
-    ) -> Self
+    fn start_with_label_session_env<I, K, V>(socket_label: &str, session_name: &str, env: I) -> Self
     where
         I: IntoIterator<Item = (K, V)>,
         K: AsRef<std::ffi::OsStr>,
@@ -449,10 +444,8 @@ impl E2eEnv {
         let shim_dir_guard = tempfile::tempdir().expect("create shim tempdir");
         let shim_path = write_claude_shim(shim_dir_guard.path());
 
-        let tmux_server = PrivateTmux::start_with_env([(
-            "ATM_SOCKET",
-            daemon.socket_path.as_os_str(),
-        )]);
+        let tmux_server =
+            PrivateTmux::start_with_env([("ATM_SOCKET", daemon.socket_path.as_os_str())]);
         let tmux = RealTmuxClient::with_socket(tmux_server.label().to_string());
 
         Some(Self {
@@ -523,7 +516,7 @@ async fn scenario_protocol_e2e(env: &E2eEnv) -> String {
 
         if sessions.iter().any(|s| s.id.as_str() == session_id) {
             assert!(
-                sessions.len() >= baseline_count + 1,
+                sessions.len() > baseline_count,
                 "session count should grow by at least one (baseline={baseline_count}, now={})",
                 sessions.len()
             );
@@ -594,7 +587,8 @@ async fn scenario_real_tmux_lib(env: &E2eEnv) {
         .pane_id
         .clone();
 
-    let new_pane = env.tmux
+    let new_pane = env
+        .tmux
         .split_window(&probe_pane, "30%", PaneDirection::Below, None)
         .await
         .expect("split-window");
@@ -603,10 +597,12 @@ async fn scenario_real_tmux_lib(env: &E2eEnv) {
         "split-window should return a tmux pane id like '%N', got {new_pane:?}"
     );
 
-    env.tmux.send_keys(&new_pane, "echo atm-e2e-marker")
+    env.tmux
+        .send_keys(&new_pane, "echo atm-e2e-marker")
         .await
         .expect("send-keys");
-    env.tmux.send_keys(&new_pane, "Enter")
+    env.tmux
+        .send_keys(&new_pane, "Enter")
         .await
         .expect("send-keys Enter");
 
@@ -628,7 +624,11 @@ async fn scenario_real_tmux_lib(env: &E2eEnv) {
         "expected 'atm-e2e-marker' to appear in pane {new_pane}'s capture within 3s"
     );
 
-    let panes_after = env.tmux.list_panes().await.expect("list panes (after split)");
+    let panes_after = env
+        .tmux
+        .list_panes()
+        .await
+        .expect("list panes (after split)");
     assert_eq!(
         panes_after.len(),
         panes_before.len() + 1,
@@ -681,7 +681,11 @@ async fn scenario_atm_spawn(env: &E2eEnv) {
     );
 
     // Identify the pane atm spawn just created on our server.
-    let panes_post_spawn = env.tmux.list_panes().await.expect("list panes (post-spawn)");
+    let panes_post_spawn = env
+        .tmux
+        .list_panes()
+        .await
+        .expect("list panes (post-spawn)");
     let new_panes: Vec<_> = panes_post_spawn
         .iter()
         .filter(|p| !panes_pre_spawn.iter().any(|q| q.pane_id == p.pane_id))
@@ -718,11 +722,11 @@ async fn scenario_atm_spawn(env: &E2eEnv) {
             if let Ok(parsed) = serde_json::from_slice::<Value>(&list_output.stdout) {
                 if let Some(arr) = parsed.as_array() {
                     if let Some(s) = arr.iter().find(|s| {
-                        let id_match = s.get("id")
+                        let id_match = s
+                            .get("id")
                             .and_then(Value::as_str)
-                            .map_or(false, |id| id.starts_with("fixture-"));
-                        let pane_match = s.get("tmux_pane")
-                            .and_then(Value::as_str)
+                            .is_some_and(|id| id.starts_with("fixture-"));
+                        let pane_match = s.get("tmux_pane").and_then(Value::as_str)
                             == Some(spawned_pane.as_str());
                         id_match && pane_match
                     }) {
@@ -740,7 +744,8 @@ async fn scenario_atm_spawn(env: &E2eEnv) {
         None => {
             // Snapshot what's in the spawned pane so the failure is
             // diagnosable instead of mysterious.
-            let pane_dump = env.tmux
+            let pane_dump = env
+                .tmux
                 .capture_pane(&spawned_pane)
                 .await
                 .unwrap_or_else(|e| vec![format!("(capture-pane failed: {e})")]);
@@ -791,8 +796,7 @@ async fn scenario_workspace_attach(env: &E2eEnv) {
 
     // Build a multi-window session — the interesting case for attach,
     // since per-window sidebar injection is the loop attach owns.
-    let tmux_attach_client =
-        RealTmuxClient::with_socket(attach_tmux.label().to_string());
+    let tmux_attach_client = RealTmuxClient::with_socket(attach_tmux.label().to_string());
     for label in ["new-window (2nd)", "new-window (3rd)"] {
         let mut cmd = Command::new("tmux");
         cmd.args([
@@ -820,12 +824,7 @@ async fn scenario_workspace_attach(env: &E2eEnv) {
     );
 
     let attach_output = Command::new(&env.atm_path)
-        .args([
-            "workspace",
-            "attach",
-            &attach_session_name,
-            "--isolate",
-        ])
+        .args(["workspace", "attach", &attach_session_name, "--isolate"])
         .env("ATM_NO_ATTACH", "1")
         .env("XDG_DATA_HOME", attach_data_dir.path())
         .env("XDG_STATE_HOME", &env.daemon.state_dir)
@@ -847,7 +846,9 @@ async fn scenario_workspace_attach(env: &E2eEnv) {
         std::collections::HashMap::new();
     for entry in &post_attach_panes {
         if entry.is_sidebar {
-            *windows_with_sidebar.entry(entry.window_id.clone()).or_insert(0) += 1;
+            *windows_with_sidebar
+                .entry(entry.window_id.clone())
+                .or_insert(0) += 1;
         }
     }
 
@@ -887,12 +888,7 @@ async fn scenario_workspace_attach(env: &E2eEnv) {
     // Idempotency: running attach a second time must NOT add another
     // sidebar to any window. The production code keys off `@atm-sidebar`.
     let attach_output_2 = Command::new(&env.atm_path)
-        .args([
-            "workspace",
-            "attach",
-            &attach_session_name,
-            "--isolate",
-        ])
+        .args(["workspace", "attach", &attach_session_name, "--isolate"])
         .env("ATM_NO_ATTACH", "1")
         .env("XDG_DATA_HOME", attach_data_dir.path())
         .env("XDG_STATE_HOME", &env.daemon.state_dir)
@@ -917,7 +913,9 @@ async fn scenario_workspace_attach(env: &E2eEnv) {
 
 #[tokio::test(flavor = "current_thread")]
 async fn atm_atmd_tmux_end_to_end() {
-    let Some(env) = E2eEnv::try_setup().await else { return };
+    let Some(env) = E2eEnv::try_setup().await else {
+        return;
+    };
 
     // Scenarios run sequentially against the shared fixture. Each
     // scenario lives in its own async fn so a panic surfaces with that
@@ -966,7 +964,7 @@ fn list_panes_with_sidebar_marker(socket_label: &str) -> Option<Vec<PaneEntry>> 
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let parts: Vec<&str> = line.split('|').collect();
         if let (Some(window_id), Some(pane_id)) = (parts.first(), parts.get(1)) {
-            let is_sidebar = parts.get(2).map_or(false, |s| *s == "1");
+            let is_sidebar = parts.get(2).is_some_and(|s| *s == "1");
             entries.push(PaneEntry {
                 window_id: window_id.to_string(),
                 pane_id: pane_id.to_string(),

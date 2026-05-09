@@ -2126,10 +2126,7 @@ mod spawn_command_tests {
         // 4. Embedded single-quote is escaped via the standard POSIX
         //    trick: close-quote, escape literal, reopen.
         env.set("/path/it's/claude");
-        assert_eq!(
-            build_spawn_command(None, None),
-            "'/path/it'\\''s/claude'"
-        );
+        assert_eq!(build_spawn_command(None, None), "'/path/it'\\''s/claude'");
 
         // 5. Cwd and model compose around the quoted command.
         env.unset();

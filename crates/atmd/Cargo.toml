@@ -11,7 +11,7 @@ description = "ATM daemon - session registry and broadcast server for Claude Cod
 readme = "../../README.md"
 # This crate is library-only. The actual `atmd` binary lives at the
 # workspace root (`src/bin/atmd.rs`) and is what `cargo install` /
-# binstall produce. Disable auto-bin so a future `src/main.rs` doesn't
+# binstall produces. Disable auto-bin so a future `src/main.rs` doesn't
 # get silently picked up and collide with the root's `[[bin]]`.
 autobins = false
 
