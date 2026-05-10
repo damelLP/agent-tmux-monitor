@@ -1625,7 +1625,7 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
         &["send-keys", "-t", &agent_pane, "claude", "Enter"],
     )?;
 
-    // 9. Install resize/new-window hooks + prefix-R keybinding
+    // 9. Install resize/new-window hooks + keybindings
     install_resize_hooks(&socket_name, &session_name)?;
     install_new_window_hook(&socket_name, &session_name)?;
 
