@@ -180,6 +180,12 @@ impl RawPiEvent {
             PiEventType::AtmNeedsInputOpen => LifecycleEvent::NeedsInput {
                 reason: atm_core::NeedsInputReason::Notification {
                     kind: atm_core::NotificationKind::PermissionPrompt,
+                    // Title carries the dialog's prompt text (e.g. the
+                    // bash command being gated by pi-amplike). The TUI
+                    // surfaces it in `current_activity` so the user can
+                    // see *what* permission is being asked, not just
+                    // that *something* is.
+                    label: p.title.clone(),
                 },
             },
             // When the dialog closes, pi resumes work. WorkingStart
@@ -243,13 +249,36 @@ mod tests {
     #[test]
     fn atm_needs_input_open_becomes_needs_input_permission_prompt() {
         // Emitted by pi-atm when ctx.ui.select(...) is called
-        // (e.g. pi-amplike's bash permission gate).
+        // (e.g. pi-amplike's bash permission gate). Title is None
+        // when the dialog has no caption.
         let e = raw(PiEventType::AtmNeedsInputOpen, PiPayload::default());
         assert_eq!(
             e.to_lifecycle_event(),
             Some(LifecycleEvent::NeedsInput {
                 reason: atm_core::NeedsInputReason::Notification {
-                    kind: atm_core::NotificationKind::PermissionPrompt
+                    kind: atm_core::NotificationKind::PermissionPrompt,
+                    label: None,
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn atm_needs_input_open_plumbs_title_into_label() {
+        // Real shape: pi-atm forwards `title` from the
+        // intercepted ctx.ui.select call so the TUI can show
+        // the gated command (or whatever the dialog asked).
+        let payload = PiPayload {
+            title: Some("Allow `rm -rf /tmp/cache`?".to_string()),
+            ..PiPayload::default()
+        };
+        let e = raw(PiEventType::AtmNeedsInputOpen, payload);
+        assert_eq!(
+            e.to_lifecycle_event(),
+            Some(LifecycleEvent::NeedsInput {
+                reason: atm_core::NeedsInputReason::Notification {
+                    kind: atm_core::NotificationKind::PermissionPrompt,
+                    label: Some("Allow `rm -rf /tmp/cache`?".to_string()),
                 }
             })
         );

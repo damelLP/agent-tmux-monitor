@@ -1060,11 +1060,20 @@ fn activity_for_needs_input(reason: &NeedsInputReason) -> ActivityDetail {
         NeedsInputReason::InteractiveTool { tool } | NeedsInputReason::PermissionGate { tool } => {
             ActivityDetail::new(tool.as_str())
         }
-        NeedsInputReason::Notification { kind } => match kind {
-            NotificationKind::PermissionPrompt => ActivityDetail::with_context("Permission"),
-            NotificationKind::ElicitationDialog => ActivityDetail::with_context("MCP Input"),
-            other => ActivityDetail::with_context(other.as_str()),
-        },
+        NeedsInputReason::Notification { kind, label } => {
+            // When the vendor-supplied label is present (e.g. pi
+            // forwards the dialog title from `ctx.ui.select`), prefer
+            // it over the kind-derived static string — it tells the
+            // user what's actually being asked.
+            if let Some(text) = label.as_deref() {
+                return ActivityDetail::with_context(text);
+            }
+            match kind {
+                NotificationKind::PermissionPrompt => ActivityDetail::with_context("Permission"),
+                NotificationKind::ElicitationDialog => ActivityDetail::with_context("MCP Input"),
+                other => ActivityDetail::with_context(other.as_str()),
+            }
+        }
     }
 }
 

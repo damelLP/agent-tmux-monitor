@@ -82,10 +82,15 @@ impl RawHookEvent {
                     .as_deref()
                     .map(NotificationKind::from);
                 match kind {
-                    Some(NotificationKind::PermissionPrompt)
-                    | Some(NotificationKind::ElicitationDialog) => LifecycleEvent::NeedsInput {
+                    Some(
+                        k @ (NotificationKind::PermissionPrompt
+                        | NotificationKind::ElicitationDialog),
+                    ) => LifecycleEvent::NeedsInput {
                         reason: NeedsInputReason::Notification {
-                            kind: kind.unwrap_or(NotificationKind::PermissionPrompt),
+                            kind: k,
+                            // Claude `Notification` events don't carry
+                            // a per-prompt label — only a kind tag.
+                            label: None,
                         },
                     },
                     Some(NotificationKind::IdlePrompt) => LifecycleEvent::Idle,
@@ -303,6 +308,7 @@ mod tests {
             Some(LifecycleEvent::NeedsInput {
                 reason: NeedsInputReason::Notification {
                     kind: NotificationKind::PermissionPrompt,
+                    label: None,
                 }
             })
         );

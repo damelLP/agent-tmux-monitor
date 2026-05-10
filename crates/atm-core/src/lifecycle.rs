@@ -123,8 +123,16 @@ pub enum NeedsInputReason {
     /// Pi extension-mediated `tool_call` permission gate.
     PermissionGate { tool: Tool },
     /// Generic notification-driven prompt
-    /// (Claude `Notification(permission_prompt|elicitation_dialog)`).
-    Notification { kind: NotificationKind },
+    /// (Claude `Notification(permission_prompt|elicitation_dialog)`,
+    /// pi `atm_needs_input_open`). `label` carries an optional
+    /// vendor-supplied human string (e.g. the dialog title or the
+    /// command being gated) so the TUI can show *what* is being
+    /// asked, not just that *something* is.
+    Notification {
+        kind: NotificationKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
 }
 
 /// Vendor-neutral lifecycle event.
@@ -270,6 +278,13 @@ mod tests {
             LifecycleEvent::NeedsInput {
                 reason: NeedsInputReason::Notification {
                     kind: NotificationKind::PermissionPrompt,
+                    label: None,
+                },
+            },
+            LifecycleEvent::NeedsInput {
+                reason: NeedsInputReason::Notification {
+                    kind: NotificationKind::PermissionPrompt,
+                    label: Some("rm -rf /tmp".into()),
                 },
             },
             LifecycleEvent::ToolCallStart {
