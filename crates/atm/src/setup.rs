@@ -25,12 +25,12 @@ const ATM_HOOK_SCRIPT: &str = include_str!("../scripts/atm-hook");
 
 /// The pi-atm TypeScript extension content, embedded at compile time.
 /// pi loads `.ts` files directly via `@mariozechner/jiti`.
-const PI_ATM_EXTENSION: &str = include_str!("../../../extensions/pi-atm/extensions/pi-atm.ts");
+const PI_ATM_EXTENSION: &str = include_str!("../assets/pi-atm/extensions/pi-atm.ts");
 
 /// Package manifest written next to the embedded extension. Pi looks
 /// at the `pi.extensions` array (not `main`) to discover extension
 /// files within an installed package.
-const PI_ATM_PACKAGE_JSON: &str = include_str!("../../../extensions/pi-atm/package.json");
+const PI_ATM_PACKAGE_JSON: &str = include_str!("../assets/pi-atm/package.json");
 
 /// All valid Claude Code hook types.
 /// See: https://docs.anthropic.com/en/docs/claude-code/hooks

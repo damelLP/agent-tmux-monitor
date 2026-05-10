@@ -2,7 +2,11 @@ name: Release
 
 on:
   push:
+    branches: [main]
     tags: ['v*']
+    paths:
+      - Cargo.toml
+      - Cargo.lock
   workflow_dispatch:
     inputs:
       publish_crates:
@@ -24,6 +28,16 @@ on:
         default: true
       publish_atm_tmux:
         description: 'Publish crate: atm-tmux'
+        required: false
+        type: boolean
+        default: true
+      publish_atm_claude_adapter:
+        description: 'Publish crate: atm-claude-adapter'
+        required: false
+        type: boolean
+        default: true
+      publish_atm_pi_adapter:
+        description: 'Publish crate: atm-pi-adapter'
         required: false
         type: boolean
         default: true
@@ -49,7 +63,7 @@ on:
         type: boolean
         default: true
       dry_run:
-        description: 'Run cargo publish --dry-run (true/false). Default false.'
+        description: 'Verify packages without uploading (true/false). Default false.'
         required: false
         type: boolean
         default: false
@@ -61,8 +75,86 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  prepare:
+    name: Prepare release metadata
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.meta.outputs.version }}
+      tag: ${{ steps.meta.outputs.tag }}
+      tag_exists: ${{ steps.meta.outputs.tag_exists }}
+      should_release: ${{ steps.meta.outputs.should_release }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Determine release version
+        id: meta
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |-
+          set -euo pipefail
+          version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "atm") | .version')"
+          if [ -z "$version" ] || [ "$version" = "null" ]; then
+            echo "::error::Could not determine atm package version"
+            exit 1
+          fi
+
+          tag="v$version"
+          tag_exists=false
+          release_exists=false
+          should_release=false
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            tag_exists=true
+          fi
+
+          release_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/releases/tags/$tag"
+          if curl -fsSL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$release_url" >/dev/null 2>&1; then
+            release_exists=true
+          fi
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            if [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+              echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo version $version ($tag)"
+              exit 1
+            fi
+            if [ "$release_exists" = "true" ]; then
+              echo "Release $tag already exists; skipping release creation."
+            else
+              should_release=true
+            fi
+          elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
+            if [ "$release_exists" = "true" ]; then
+              echo "Release $tag already exists; skipping release creation."
+            else
+              should_release=true
+            fi
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
+          echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
+          echo "Version: $version"
+          echo "Tag: $tag"
+          echo "Tag exists: $tag_exists"
+          echo "Release exists: $release_exists"
+          echo "Should release: $should_release"
+
   build:
     name: Build ${{ matrix.target }}
+    needs: prepare
+    if: needs.prepare.outputs.should_release == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -98,7 +190,8 @@ jobs:
 
       - name: Package
         run: |-
-          DIRNAME="atm-${{ github.ref_name }}"
+          VERSION="${{ needs.prepare.outputs.version }}"
+          DIRNAME="atm-$VERSION"
           mkdir "$DIRNAME"
           cp target/${{ matrix.target }}/release/atm "$DIRNAME/"
           cp target/${{ matrix.target }}/release/atmd "$DIRNAME/"
@@ -114,12 +207,24 @@ jobs:
 
   release:
     name: Create Release
-    needs: build
+    needs: [prepare, build]
+    if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Create version tag
+        if: github.ref_type != 'tag' && needs.prepare.outputs.tag_exists != 'true'
+        run: |-
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "${{ needs.prepare.outputs.tag }}" "$GITHUB_SHA"
+          git push origin "${{ needs.prepare.outputs.tag }}"
 
       - name: Download artifacts
         uses: actions/download-artifact@v4
@@ -128,8 +233,9 @@ jobs:
 
       - name: Create release
         uses: softprops/action-gh-release@v1
-        if: startsWith(github.ref, 'refs/tags/')
         with:
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             artifacts/**/atm-*.tar.gz
             scripts/install.sh
@@ -159,18 +265,20 @@ jobs:
           set -euo pipefail
           EVENT_JSON="$GITHUB_EVENT_PATH"
 
-          # Keep the same ordering you used originally.
-          ORIGINAL_ORDER=("atm-core" "atm-protocol" "atm-tmux" "atmd" "atm-tui" "atm")
+          # Publish crates in dependency order so crates.io can resolve internal dependencies.
+          ORIGINAL_ORDER=("atm-core" "atm-protocol" "atm-tmux" "atm-claude-adapter" "atm-pi-adapter" "atmd" "atm-tui" "atm")
 
           selected=()
           # Using jq (available on GitHub ubuntu runners) to read the dispatch inputs
-          for box in publish_atm_core publish_atm_protocol publish_atm_tmux publish_atm_tui publish_atmd publish_atm; do
+          for box in publish_atm_core publish_atm_protocol publish_atm_tmux publish_atm_claude_adapter publish_atm_pi_adapter publish_atm_tui publish_atmd publish_atm; do
             val=$(jq -r --arg k "$box" '.inputs[$k] // "false"' "$EVENT_JSON" 2>/dev/null || echo "false")
             if [ "$(echo "$val" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
               case "$box" in
                 publish_atm_core) selected+=("atm-core");;
                 publish_atm_protocol) selected+=("atm-protocol");;
                 publish_atm_tmux) selected+=("atm-tmux");;
+                publish_atm_claude_adapter) selected+=("atm-claude-adapter");;
+                publish_atm_pi_adapter) selected+=("atm-pi-adapter");;
                 publish_atm_tui) selected+=("atm-tui");;
                 publish_atmd) selected+=("atmd");;
                 publish_atm) selected+=("atm");;
@@ -212,15 +320,59 @@ jobs:
       - name: Publish crates in order
         run: |-
           set -euo pipefail
+
+          crate_version() {
+            cargo metadata --no-deps --format-version 1 \
+              | jq -r --arg name "$1" '.packages[] | select(.name == $name) | .version'
+          }
+
+          crate_is_published() {
+            local crate="$1"
+            local version="$2"
+            curl -fsSL \
+              -H "User-Agent: agent-tmux-manager-release-workflow" \
+              "https://crates.io/api/v1/crates/$crate" \
+              | jq -e --arg version "$version" '.versions[] | select(.num == $version)' >/dev/null
+          }
+
+          wait_for_crate() {
+            local crate="$1"
+            local version="$2"
+            for attempt in {1..30}; do
+              if crate_is_published "$crate" "$version"; then
+                echo "$crate $version is visible on crates.io"
+                return 0
+              fi
+              echo "Waiting for $crate $version to appear in crates.io index (attempt $attempt/30)"
+              sleep 10
+            done
+            echo "::error::$crate $version did not become visible on crates.io in time"
+            return 1
+          }
+
           read -r -a pkgs <<< "${{ steps.plan.outputs.publish_names }}"
+
+          if [ "${{ steps.plan.outputs.dry_run }}" = "true" ]; then
+            echo "VERIFY: cargo package --workspace"
+            cargo package --workspace
+            exit 0
+          fi
+
           for p in "${pkgs[@]}"; do
-            if [ "${{ steps.plan.outputs.dry_run }}" = "true" ]; then
-              echo "DRY RUN: cargo publish -p $p"
-            else
-              echo "Publishing $p"
-              cargo publish -p "$p" || { echo "::error::cargo publish failed for $p"; exit 1; }
-              sleep 20
+            version="$(crate_version "$p")"
+            if [ -z "$version" ] || [ "$version" = "null" ]; then
+              echo "::error::Could not determine version for crate $p"
+              exit 1
             fi
+
+            if crate_is_published "$p" "$version"; then
+              echo "$p $version is already published; skipping"
+              continue
+            fi
+
+            echo "Publishing $p $version"
+            cargo publish -p "$p" || { echo "::error::cargo publish failed for $p"; exit 1; }
+            wait_for_crate "$p" "$version"
           done
 
       - name: Finished
