@@ -38,6 +38,9 @@ use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
+
+#[cfg(test)]
+static TEST_ENV_LOCK: Mutex<()> = Mutex::new(());
 use tracing_subscriber::EnvFilter;
 
 use atm_core::{
@@ -2231,16 +2234,24 @@ mod cli_tests {
     use clap::Parser;
 
     struct IsolatedConfigHome {
+        _guard: std::sync::MutexGuard<'static, ()>,
         _dir: tempfile::TempDir,
         prev: Option<std::ffi::OsString>,
     }
 
     impl IsolatedConfigHome {
         fn new() -> Self {
+            let guard = super::TEST_ENV_LOCK
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
             let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
             let prev = std::env::var_os("XDG_CONFIG_HOME");
             std::env::set_var("XDG_CONFIG_HOME", dir.path());
-            Self { _dir: dir, prev }
+            Self {
+                _guard: guard,
+                _dir: dir,
+                prev,
+            }
         }
     }
 
@@ -2410,6 +2421,9 @@ mod spawn_command_tests {
     /// (`serial_test` would solve that but isn't worth a dep just here.)
     #[test]
     fn build_spawn_command_cases() {
+        let _guard = super::TEST_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let bin = EnvGuard::capture("ATM_SPAWN_BIN");
         let args = EnvGuard::capture("ATM_SPAWN_ARGS");
         let pi_bin = EnvGuard::capture("ATM_SPAWN_PI_BIN");
