@@ -143,6 +143,15 @@ fn build_detail_lines_inline(session: &SessionView) -> Vec<Line<'static>> {
         Line::from(vec![
             Span::styled("  ID: ", label_style),
             Span::styled(session.id_short.clone(), value_style),
+            Span::styled("  Harness: ", label_style),
+            Span::styled(
+                if session.harness.is_empty() {
+                    "claude".to_string()
+                } else {
+                    session.harness.clone()
+                },
+                value_style,
+            ),
             Span::styled("  Agent: ", label_style),
             Span::styled(session.agent_type.clone(), value_style),
             Span::styled("  Model: ", label_style),

@@ -23,8 +23,10 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
+use atm_claude_adapter::RawHookEvent;
 use atm_core::SessionId;
-use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion, RawHookEvent};
+use atm_pi_adapter::RawPiEvent;
+use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion};
 
 use crate::discovery::{DiscoveryResult, DiscoveryService};
 use crate::registry::{RegistryHandle, SessionEvent};
@@ -136,7 +138,7 @@ impl ConnectionHandler {
         // Perform protocol handshake
         match self.handle_handshake().await {
             Ok(()) => {
-                info!(
+                debug!(
                     client_id = ?self.client_id,
                     "Client handshake completed"
                 );
@@ -162,7 +164,7 @@ impl ConnectionHandler {
             );
         }
 
-        info!(client_id = ?self.client_id, "Client disconnected");
+        debug!(client_id = ?self.client_id, "Client disconnected");
         client_id
     }
 
@@ -274,6 +276,10 @@ impl ConnectionHandler {
 
             MessageType::HookEvent { data } => {
                 self.handle_hook_event(data).await?;
+            }
+
+            MessageType::PiEvent { data } => {
+                self.handle_pi_event(data).await?;
             }
 
             MessageType::ListSessions => {
@@ -392,14 +398,17 @@ impl ConnectionHandler {
     }
 
     /// Handles a hook event from Claude Code.
+    ///
+    /// Translates the Claude raw event into a vendor-neutral
+    /// `LifecycleEvent` at this boundary, so the registry below sees
+    /// only the abstract event vocabulary.
     async fn handle_hook_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
-        info!(client_id = ?self.client_id, "Received hook event data");
+        debug!(client_id = ?self.client_id, "Received hook event data");
 
-        // Parse the hook event
         let raw_event: RawHookEvent =
             serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
 
-        info!(
+        debug!(
             session_id = %raw_event.session_id(),
             event_type = ?raw_event.event_type(),
             pid = ?raw_event.pid,
@@ -407,26 +416,99 @@ impl ConnectionHandler {
             "Processing hook event"
         );
 
-        // Get event type
-        let event_type = raw_event.event_type().ok_or_else(|| {
-            ConnectionError::ParseError(format!(
-                "Unknown hook event type: '{}' (session_id={}, tool_name={:?})",
-                raw_event.hook_event_name, raw_event.session_id, raw_event.tool_name
-            ))
-        })?;
+        // Symmetric with `handle_pi_event`'s suppression-skip below:
+        // `to_lifecycle_event` returns `None` for two reasons that
+        // shouldn't crash the connection layer — unknown
+        // `hook_event_name` (a future Claude event we don't translate
+        // yet) and known-but-malformed payloads (e.g. `PreToolUse`
+        // without a `tool_name`, dropped by the empty-tool_name
+        // guard). Log either case at debug and move on.
+        let lifecycle = match raw_event.to_lifecycle_event() {
+            Some(le) => le,
+            None => {
+                debug!(
+                    hook_event_name = %raw_event.hook_event_name,
+                    event_type = ?raw_event.event_type(),
+                    tool_name = ?raw_event.tool_name,
+                    "hook event suppressed by adapter"
+                );
+                return Ok(());
+            }
+        };
 
-        // Apply to registry (including PID and tmux_pane for process lifecycle tracking)
+        let session_id = raw_event.session_id();
+        let pid = raw_event.pid;
+        let tmux_pane = raw_event.tmux_pane.clone();
+
         self.registry
-            .apply_hook_event(
-                raw_event.session_id(),
-                event_type,
-                raw_event.tool_name,
-                raw_event.notification_type,
+            .apply_lifecycle_event(
+                session_id,
+                lifecycle,
+                atm_core::Harness::ClaudeCode,
+                pid,
+                tmux_pane,
+            )
+            .await
+            .map_err(|e| ConnectionError::RegistryError(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Handles a pi event from the pi extension.
+    ///
+    /// Symmetric with [`Self::handle_hook_event`] — parses raw pi-shaped
+    /// JSON via `atm-pi-adapter`, translates into a vendor-neutral
+    /// `LifecycleEvent`, and forwards to the registry.
+    async fn handle_pi_event(&mut self, data: serde_json::Value) -> Result<(), ConnectionError> {
+        debug!(client_id = ?self.client_id, "Received pi event data");
+
+        let raw_event: RawPiEvent =
+            serde_json::from_value(data).map_err(|e| ConnectionError::ParseError(e.to_string()))?;
+
+        debug!(
+            session_id = ?raw_event.session_id,
+            event = %raw_event.event,
+            pid = ?raw_event.pid,
+            tmux_pane = ?raw_event.tmux_pane,
+            "Processing pi event"
+        );
+
+        // Pi adapter intentionally returns None for events it suppresses
+        // (e.g. tool_execution_start/tool_result paired duplicates) and
+        // for high-frequency internal events. Skip those silently.
+        let lifecycle = match raw_event.to_lifecycle_event() {
+            Some(le) => le,
+            None => {
+                debug!(event = %raw_event.event, "pi event suppressed by adapter");
+                return Ok(());
+            }
+        };
+
+        // Pi events identify their session via the extension-injected
+        // `session_id` field. If absent (early events, before pi's
+        // `session_start` fires), derive a pending id from the pid so
+        // two pi processes don't collide on a shared sentinel id —
+        // matches Claude's `pending_from_pid` discovery pattern.
+        // Reject events that have neither: nothing to attribute them to.
+        let session_id = match raw_event.session_id.as_deref() {
+            Some(s) => atm_core::SessionId::new(s),
+            None => raw_event
+                .pid
+                .map(atm_core::SessionId::pending_from_pid)
+                .ok_or_else(|| {
+                    ConnectionError::ParseError(
+                        "pi event missing both session_id and pid; cannot attribute".to_string(),
+                    )
+                })?,
+        };
+
+        self.registry
+            .apply_lifecycle_event(
+                session_id,
+                lifecycle,
+                atm_core::Harness::Pi,
                 raw_event.pid,
                 raw_event.tmux_pane,
-                raw_event.agent_id,
-                raw_event.agent_type,
-                raw_event.prompt,
             )
             .await
             .map_err(|e| ConnectionError::RegistryError(e.to_string()))?;

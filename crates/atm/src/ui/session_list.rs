@@ -234,6 +234,13 @@ fn create_agent_line(
             Style::default().fg(Color::DarkGray),
         ),
         Span::raw(" "),
+        // Harness badge: `[pi]`, `[claude]`, `[?]`. Rendered in
+        // a distinct color so vendor differences are scannable.
+        Span::styled(
+            format!("[{}]", harness_label(&session.harness)),
+            Style::default().fg(harness_color(&session.harness)),
+        ),
+        Span::raw(" "),
         // Model (truncated)
         Span::styled(
             truncate_string(&session.model, 8),
@@ -242,6 +249,27 @@ fn create_agent_line(
     ];
 
     Line::from(spans)
+}
+
+/// Display label for the harness badge. Empty string (legacy sessions
+/// from before this field existed) defaults to `claude` since that was
+/// the only supported harness.
+fn harness_label(harness: &str) -> &str {
+    if harness.is_empty() {
+        "claude"
+    } else {
+        harness
+    }
+}
+
+/// Per-harness badge color so users can scan the list for pi sessions
+/// at a glance.
+fn harness_color(harness: &str) -> Color {
+    match harness {
+        "pi" => Color::Magenta,
+        "claude" | "" => Color::Yellow,
+        _ => Color::DarkGray,
+    }
 }
 
 /// Creates a compact line for an agent row in narrow sidebars.

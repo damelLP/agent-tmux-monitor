@@ -19,7 +19,8 @@ use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, info, warn};
 
 use atm_core::{
-    AgentType, HookEventType, SessionDomain, SessionId, SessionInfrastructure, SessionView,
+    AgentType, LifecycleEvent, NeedsInputReason, SessionDomain, SessionId, SessionInfrastructure,
+    SessionView,
 };
 use atm_protocol::RawStatusLine;
 
@@ -153,29 +154,16 @@ impl RegistryActor {
                 let result = self.handle_update_from_status_line(session_id, data);
                 let _ = respond_to.send(result);
             }
-            RegistryCommand::ApplyHookEvent {
+            RegistryCommand::ApplyLifecycleEvent {
                 session_id,
-                event_type,
-                tool_name,
-                notification_type,
+                event,
+                harness,
                 pid,
                 tmux_pane,
-                agent_id,
-                agent_type,
-                prompt,
                 respond_to,
             } => {
-                let result = self.handle_apply_hook_event(
-                    session_id,
-                    event_type,
-                    tool_name,
-                    notification_type,
-                    pid,
-                    tmux_pane,
-                    agent_id,
-                    agent_type,
-                    prompt,
-                );
+                let result =
+                    self.handle_apply_lifecycle_event(session_id, event, harness, pid, tmux_pane);
                 let _ = respond_to.send(result);
             }
             RegistryCommand::GetSession {
@@ -207,9 +195,11 @@ impl RegistryActor {
                 pid,
                 cwd,
                 tmux_pane,
+                harness,
                 respond_to,
             } => {
-                let result = self.handle_register_discovered(session_id, pid, cwd, tmux_pane);
+                let result =
+                    self.handle_register_discovered(session_id, pid, cwd, tmux_pane, harness);
                 let _ = respond_to.send(result);
             }
         }
@@ -336,6 +326,7 @@ impl RegistryActor {
         pid: u32,
         cwd: PathBuf,
         tmux_pane: Option<String>,
+        harness: atm_core::Harness,
     ) -> Result<(), RegistryError> {
         // PID 0 is invalid
         if pid == 0 {
@@ -406,25 +397,19 @@ impl RegistryActor {
             return Err(RegistryError::RegistryFull { max: MAX_SESSIONS });
         }
 
-        // Create minimal session with defaults (genuinely new process)
-        use atm_core::{AgentType, Model};
-        let mut session = SessionDomain::new(
+        // Create minimal session with defaults (genuinely new process).
+        // Agent type and model will be updated when the status line arrives.
+        // Harness tag comes from whichever discoverer matched (Claude, pi,
+        // future); subsequent adapter events can refine but not change identity.
+        use atm_core::Model;
+        let session = build_session_from_pid(
             session_id.clone(),
-            AgentType::GeneralPurpose, // Will be updated when status line arrives
-            Model::Unknown,            // Will be updated when status line arrives
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+            harness,
+            tmux_pane,
+            Some(cwd),
         );
-        // Resolve project/worktree from working directory.
-        // Note: these are local stat() calls walking up ~5 dirs (~5μs),
-        // acceptable inline per Tokio guidelines for sub-100μs sync work.
-        let cwd_str = cwd.to_string_lossy().to_string();
-        session.project_root = atm_core::resolve_project_root(&cwd_str);
-        let (wt_path, wt_branch) = atm_core::resolve_worktree_info(&cwd_str);
-        session.worktree_path = wt_path;
-        session.worktree_branch = wt_branch;
-        // Set working directory (move, no clone needed)
-        session.working_directory = Some(cwd_str);
-        // Set tmux pane from discovery
-        session.tmux_pane = tmux_pane;
         let agent_type = session.agent_type.clone();
 
         // Create new infrastructure with PID
@@ -460,6 +445,47 @@ impl RegistryActor {
         self.try_correlate_subagent(&session_id, pid);
 
         Ok(())
+    }
+
+    /// Renames an existing session at `pid` from `old_id` to `new_id`,
+    /// updates the session_id index, and publishes the
+    /// `Removed{Upgraded}` + `Registered` event pair so TUI subscribers
+    /// see the id transition cleanly.
+    ///
+    /// Used by both the Claude status-line path and any vendor adapter
+    /// (pi today) whose first events arrive before the real session_id
+    /// is known. Without this, a session discovered as `pending-{pid}`
+    /// stays at that id forever even after real adapter events fire.
+    ///
+    /// No-op if the session is not present at `pid`.
+    fn reconcile_session_id(&mut self, pid: u32, old_id: SessionId, new_id: SessionId) {
+        if old_id == new_id {
+            return;
+        }
+        let Some((session, _)) = self.sessions_by_pid.get_mut(&pid) else {
+            return;
+        };
+        session.id = new_id.clone();
+        let agent_type = session.agent_type.clone();
+
+        self.session_id_to_pid.remove(&old_id);
+        self.session_id_to_pid.insert(new_id.clone(), pid);
+
+        info!(
+            old_id = %old_id,
+            new_id = %new_id,
+            pid = pid,
+            "Session ID upgraded"
+        );
+
+        let _ = self.event_publisher.send(SessionEvent::Removed {
+            session_id: old_id,
+            reason: RemovalReason::Upgraded,
+        });
+        let _ = self.event_publisher.send(SessionEvent::Registered {
+            session_id: new_id,
+            agent_type,
+        });
     }
 
     /// Handles status line update.
@@ -542,10 +568,18 @@ impl RegistryActor {
         session_id: SessionId,
         raw_status: RawStatusLine,
     ) -> Result<(), RegistryError> {
-        if let Some((session, infra)) = self.sessions_by_pid.get_mut(&pid) {
-            // Update existing session
-            let old_session_id = session.id.clone();
+        // If a session already exists at this PID with a different id
+        // (e.g. pending → real), reconcile *before* taking the mutable
+        // borrow below so the helper can access `self` cleanly. The
+        // Updated event still fires after with the renamed session.
+        if let Some((existing, _)) = self.sessions_by_pid.get(&pid) {
+            let current_id = existing.id.clone();
+            if current_id != session_id {
+                self.reconcile_session_id(pid, current_id, session_id.clone());
+            }
+        }
 
+        if let Some((session, infra)) = self.sessions_by_pid.get_mut(&pid) {
             let cwd_changed = raw_status.update_session(session);
             infra.record_update();
 
@@ -565,35 +599,6 @@ impl RegistryActor {
                     session.worktree_path = wt_path;
                     session.worktree_branch = wt_branch;
                 }
-            }
-
-            // If session_id changed (e.g., pending → real), update the index
-            if old_session_id != session_id {
-                // Update the session's ID
-                session.id = session_id.clone();
-
-                // Update the index
-                self.session_id_to_pid.remove(&old_session_id);
-                self.session_id_to_pid.insert(session_id.clone(), pid);
-
-                info!(
-                    old_id = %old_session_id,
-                    new_id = %session_id,
-                    pid = pid,
-                    "Session ID upgraded"
-                );
-
-                // Publish removal event for old ID
-                let _ = self.event_publisher.send(SessionEvent::Removed {
-                    session_id: old_session_id,
-                    reason: RemovalReason::Upgraded,
-                });
-
-                // Publish registered event for new ID
-                let _ = self.event_publisher.send(SessionEvent::Registered {
-                    session_id: session_id.clone(),
-                    agent_type: session.agent_type.clone(),
-                });
             }
 
             debug!(
@@ -671,28 +676,27 @@ impl RegistryActor {
         Ok(())
     }
 
-    /// Handles applying a hook event to a session.
+    /// Handles applying a vendor-neutral lifecycle event to a session.
     ///
     /// With PID as primary key, we can look up by PID when available.
     ///
-    /// Special case: SessionEnd hook immediately removes the session from the registry.
-    #[allow(clippy::too_many_arguments)]
-    fn handle_apply_hook_event(
+    /// Special cases:
+    /// - `SessionEnd` immediately removes the session from the registry.
+    /// - `ChildSessionStart`/`ChildSessionEnd` track subagent correlation.
+    fn handle_apply_lifecycle_event(
         &mut self,
         session_id: SessionId,
-        event_type: HookEventType,
-        tool_name: Option<String>,
-        notification_type: Option<String>,
+        event: LifecycleEvent,
+        harness: atm_core::Harness,
         pid: Option<u32>,
         tmux_pane: Option<String>,
-        agent_id: Option<String>,
-        agent_type: Option<String>,
-        prompt: Option<String>,
     ) -> Result<(), RegistryError> {
-        // Handle SubagentStart: record pending child correlation
-        if event_type == HookEventType::SubagentStart {
-            if let Some(ref aid) = agent_id {
-                // Resolve parent PID and session ID
+        // Subagent correlation: ChildSessionStart records, ChildSessionEnd removes.
+        match &event {
+            LifecycleEvent::ChildSessionStart {
+                id: Some(aid),
+                role,
+            } => {
                 let resolved_parent_pid = pid
                     .or_else(|| self.session_id_to_pid.get(&session_id).copied())
                     .unwrap_or(0);
@@ -706,14 +710,13 @@ impl RegistryActor {
                     session_id.clone()
                 };
 
-                // Capture parent's process start time for PID reuse detection
                 let parent_start_time = if resolved_parent_pid != 0 {
                     crate::tmux::get_process_start_time(resolved_parent_pid)
                 } else {
                     None
                 };
 
-                let child_agent_type = agent_type
+                let child_agent_type = role
                     .as_deref()
                     .map(AgentType::from_subagent_type)
                     .unwrap_or_default();
@@ -729,18 +732,14 @@ impl RegistryActor {
                     },
                 ));
             }
-        }
-
-        // Handle SubagentStop: remove pending correlation
-        if event_type == HookEventType::SubagentStop {
-            if let Some(ref aid) = agent_id {
+            LifecycleEvent::ChildSessionEnd { id: Some(aid) } => {
                 self.pending_subagents.retain(|(id, _)| id != aid);
             }
+            _ => {}
         }
 
-        // Handle SessionEnd specially - remove session immediately
-        if event_type == HookEventType::SessionEnd {
-            // Try to find the session by PID first, then by session_id
+        // SessionEnd: remove session immediately.
+        if matches!(event, LifecycleEvent::SessionEnd { .. }) {
             let target_pid = pid.or_else(|| self.session_id_to_pid.get(&session_id).copied());
 
             if let Some(p) = target_pid {
@@ -748,13 +747,12 @@ impl RegistryActor {
                     info!(
                         session_id = %session_id,
                         pid = p,
-                        "SessionEnd hook received, removing session"
+                        "SessionEnd received, removing session"
                     );
                     return self.handle_remove_by_pid(p, RemovalReason::SessionEnded);
                 }
             }
 
-            // Session doesn't exist - this is normal due to race conditions
             debug!(
                 session_id = %session_id,
                 "SessionEnd for non-existent session (already cleaned up or never created)"
@@ -762,8 +760,25 @@ impl RegistryActor {
             return Ok(());
         }
 
+        let tool_name = tool_name_from_event(&event);
+
         // Find session by PID first (preferred), then by session_id
         let target_pid = pid.or_else(|| self.session_id_to_pid.get(&session_id).copied());
+
+        // Pending → real upgrade: a session discovered via /proc starts
+        // life as `pending-{pid}`. The first vendor-adapter event with
+        // a real session_id is our signal to reconcile, mirroring the
+        // Claude status-line upgrade path. Limited to pending → real
+        // so that ordinary pi events (which carry session_id on every
+        // frame) don't thrash the index.
+        if let Some(p) = target_pid {
+            if let Some((existing, _)) = self.sessions_by_pid.get(&p) {
+                let current_id = existing.id.clone();
+                if current_id.is_pending() && !session_id.is_pending() && current_id != session_id {
+                    self.reconcile_session_id(p, current_id, session_id.clone());
+                }
+            }
+        }
 
         let (session, infra) = match target_pid.and_then(|p| self.sessions_by_pid.get_mut(&p)) {
             Some(entry) => entry,
@@ -775,37 +790,35 @@ impl RegistryActor {
                         debug!(
                             session_id = %session_id,
                             pid = p,
-                            event_type = ?event_type,
-                            "Creating session from hook event"
+                            event = ?event,
+                            "Creating session from lifecycle event"
                         );
-                        // Create minimal session - will be updated by status line
-                        use atm_core::{AgentType, Model};
-                        let mut session = SessionDomain::new(
+                        // Read cwd from /proc/{pid}/cwd so a session created
+                        // via a vendor adapter event lands grouped under the
+                        // right project / branch from frame one. Without this,
+                        // lifecycle-event-created sessions fall into the
+                        // "Other" tree bucket because working_directory is None.
+                        let proc_cwd = std::fs::read_link(format!("/proc/{p}/cwd")).ok();
+                        use atm_core::Model;
+                        let session = build_session_from_pid(
                             session_id.clone(),
                             AgentType::GeneralPurpose,
                             Model::Unknown,
+                            harness,
+                            tmux_pane.clone(),
+                            proc_cwd,
                         );
-                        // Set tmux pane if provided by hook
-                        session.tmux_pane = tmux_pane.clone();
+
                         let mut infra = SessionInfrastructure::new();
                         infra.set_pid(p);
 
                         self.sessions_by_pid.insert(p, (session, infra));
                         self.session_id_to_pid.insert(session_id.clone(), p);
 
-                        // Now get the entry we just created
                         if let Some((session, infra)) = self.sessions_by_pid.get_mut(&p) {
-                            if event_type == HookEventType::Notification {
-                                session.apply_notification(notification_type.as_deref());
-                            } else {
-                                session.apply_hook_event(event_type, tool_name.as_deref());
-                            }
-                            if event_type == HookEventType::UserPromptSubmit {
-                                if let Some(ref pr) = prompt {
-                                    session.set_first_prompt(pr);
-                                }
-                            }
-                            if let Some(ref name) = tool_name {
+                            session.apply_lifecycle_event(&event);
+                            session.set_first_prompt_from_event(&event);
+                            if let Some(name) = tool_name.as_deref() {
                                 infra.record_tool_use(name, None);
                             }
 
@@ -819,7 +832,6 @@ impl RegistryActor {
                             });
                         }
 
-                        // Try to correlate with pending subagent
                         self.try_correlate_subagent(&session_id, p);
 
                         return Ok(());
@@ -828,46 +840,31 @@ impl RegistryActor {
 
                 debug!(
                     session_id = %session_id,
-                    event_type = ?event_type,
-                    "Hook event for non-existent session without PID, ignoring"
+                    event = ?event,
+                    "Lifecycle event for non-existent session without PID, ignoring"
                 );
                 return Ok(());
             }
         };
 
-        // Apply the hook event to update session status
-        if event_type == HookEventType::Notification {
-            session.apply_notification(notification_type.as_deref());
-        } else {
-            session.apply_hook_event(event_type, tool_name.as_deref());
-        }
+        session.apply_lifecycle_event(&event);
+        session.set_first_prompt_from_event(&event);
 
-        // Store first user prompt if this is a UserPromptSubmit event
-        if event_type == HookEventType::UserPromptSubmit {
-            if let Some(ref p) = prompt {
-                session.set_first_prompt(p);
-            }
-        }
-
-        // Update tmux_pane if provided by hook (fills in for discovered sessions)
         if tmux_pane.is_some() && session.tmux_pane.is_none() {
             session.tmux_pane = tmux_pane;
         }
 
         debug!(
             session_id = %session.id,
-            event_type = ?event_type,
-            tool_name = ?tool_name,
+            event = ?event,
             new_status = %session.status,
-            "Hook event applied"
+            "Lifecycle event applied"
         );
 
-        // Record tool usage in infrastructure
-        if let Some(ref name) = tool_name {
+        if let Some(name) = tool_name.as_deref() {
             infra.record_tool_use(name, None);
         }
 
-        // Publish updated event
         let view = SessionView::from_domain(session);
         let _ = self.event_publisher.send(SessionEvent::Updated {
             session: Box::new(view),
@@ -1132,6 +1129,57 @@ impl RegistryActor {
     }
 }
 
+/// Builds a fresh `SessionDomain` for a newly-observed PID and resolves
+/// cwd-derived fields (project root, worktree info, working directory).
+///
+/// Used by both the /proc-discovery path (`handle_register_discovered`)
+/// and the create-on-event path inside `handle_apply_lifecycle_event` so
+/// that sessions land grouped under the right project / branch from frame
+/// one regardless of how they were first observed.
+///
+/// When `cwd` is `None` (e.g., `/proc/{pid}/cwd` read failed) the
+/// project/worktree/working_directory fields are left at their defaults.
+fn build_session_from_pid(
+    session_id: SessionId,
+    agent_type: AgentType,
+    model: atm_core::Model,
+    harness: atm_core::Harness,
+    tmux_pane: Option<String>,
+    cwd: Option<PathBuf>,
+) -> SessionDomain {
+    let mut session = SessionDomain::new(session_id, agent_type, model);
+    session.harness = harness;
+    session.tmux_pane = tmux_pane;
+    if let Some(cwd) = cwd {
+        // Note: resolve_* are local stat() calls walking up ~5 dirs (~5μs),
+        // acceptable inline per Tokio guidelines for sub-100μs sync work.
+        let cwd_str = cwd.to_string_lossy().to_string();
+        session.project_root = atm_core::resolve_project_root(&cwd_str);
+        let (wt_path, wt_branch) = atm_core::resolve_worktree_info(&cwd_str);
+        session.worktree_path = wt_path;
+        session.worktree_branch = wt_branch;
+        session.working_directory = Some(cwd_str);
+    }
+    session
+}
+
+/// Extracts a tool name from a `LifecycleEvent`, when present.
+///
+/// Used to record tool usage on the session's infrastructure record.
+fn tool_name_from_event(event: &LifecycleEvent) -> Option<String> {
+    match event {
+        LifecycleEvent::ToolCallStart { name, .. } | LifecycleEvent::ToolCallEnd { name, .. } => {
+            Some(name.as_str().to_string())
+        }
+        LifecycleEvent::NeedsInput { reason } => match reason {
+            NeedsInputReason::InteractiveTool { tool }
+            | NeedsInputReason::PermissionGate { tool } => Some(tool.as_str().to_string()),
+            NeedsInputReason::Notification { .. } => None,
+        },
+        _ => None,
+    }
+}
+
 /// Check if `pid` is a descendant of `ancestor_pid` by walking /proc.
 ///
 /// Walks up the process tree via parent PID lookups, with a max depth
@@ -1156,7 +1204,7 @@ fn is_descendant_of(pid: u32, ancestor_pid: u32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{AgentType, Model};
+    use atm_core::{AgentType, Model, Tool};
     use tokio::sync::oneshot;
 
     fn create_test_session(id: &str) -> SessionDomain {
@@ -1362,18 +1410,18 @@ mod tests {
             respond_to: tx,
         });
 
-        // Apply hook event
+        // Apply lifecycle event
         let (tx, rx) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("test-123"),
-            event_type: HookEventType::PreToolUse,
-            tool_name: Some("Bash".to_string()),
-            notification_type: None,
+            event: LifecycleEvent::ToolCallStart {
+                name: Tool::Bash,
+                tool_use_id: None,
+                input: None,
+            },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: None,
-            agent_type: None,
-            prompt: None,
             respond_to: tx,
         });
 
@@ -1411,16 +1459,12 @@ mod tests {
 
         // Apply SessionEnd hook - should remove the session
         let (tx, rx) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("test-session-end"),
-            event_type: HookEventType::SessionEnd,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::SessionEnd { reason: None },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: None,
-            agent_type: None,
-            prompt: None,
             respond_to: tx,
         });
 
@@ -1447,16 +1491,12 @@ mod tests {
 
         // Apply SessionEnd to non-existent session (race condition scenario)
         let (tx, rx) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("nonexistent"),
-            event_type: HookEventType::SessionEnd,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::SessionEnd { reason: None },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: None,
-            agent_type: None,
-            prompt: None,
             respond_to: tx,
         });
 
@@ -1605,6 +1645,7 @@ mod tests {
             pid: current_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         };
         actor.handle_command(cmd);
@@ -1689,6 +1730,139 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_pending_session_upgrade_on_lifecycle_event() {
+        // Mirrors test_pending_session_upgrade_on_status_line but
+        // exercises the vendor-adapter lifecycle path. Without the
+        // reconcile call in handle_apply_lifecycle_event, a pi
+        // session discovered via /proc would stay as `pending-{pid}`
+        // forever, even after the first event with a real session_id.
+        let (_, mut actor, mut event_rx) = create_actor();
+
+        let current_pid = std::process::id();
+        let pending_id = SessionId::pending_from_pid(current_pid);
+
+        // Step 1: discovery registers a pending session.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: pending_id.clone(),
+            pid: current_pid,
+            cwd: std::path::PathBuf::from("/home/user/project"),
+            tmux_pane: None,
+            harness: atm_core::Harness::Pi,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+        assert_eq!(actor.session_count(), 1);
+
+        // Drain register/update events from discovery.
+        while event_rx.try_recv().is_ok() {}
+
+        // Step 2: a vendor adapter (pi) fires a lifecycle event with
+        // the real session id and the same PID. The session should
+        // get its id upgraded.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
+            session_id: SessionId::new("real-pi-session"),
+            event: atm_core::LifecycleEvent::WorkingStart,
+            harness: atm_core::Harness::Pi,
+            pid: Some(current_pid),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Still one session (upgraded, not added).
+        assert_eq!(actor.session_count(), 1);
+
+        // Lookup by real id succeeds.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("real-pi-session"),
+            respond_to: tx,
+        });
+        let session = rx.await.unwrap();
+        assert!(session.is_some(), "real id should resolve");
+        assert_eq!(session.unwrap().id.as_str(), "real-pi-session");
+
+        // Lookup by old pending id fails.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: pending_id,
+            respond_to: tx,
+        });
+        assert!(
+            rx.await.unwrap().is_none(),
+            "pending id should no longer resolve"
+        );
+
+        // The Removed{Upgraded} + Registered event pair should fire.
+        let mut found_removed = false;
+        let mut found_registered = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                SessionEvent::Removed {
+                    reason: RemovalReason::Upgraded,
+                    ..
+                } => found_removed = true,
+                SessionEvent::Registered { session_id, .. }
+                    if session_id.as_str() == "real-pi-session" =>
+                {
+                    found_registered = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(found_removed, "expected Removed{{Upgraded}} for pending id");
+        assert!(found_registered, "expected Registered for real id");
+    }
+
+    #[tokio::test]
+    async fn test_lifecycle_event_does_not_rename_real_to_real() {
+        // Defensive: only pending → real triggers reconcile. Two
+        // adapter events with different real session_ids on the same
+        // PID must NOT thrash the index — that would mean some other
+        // bug (PID reuse, stale state) and the daemon shouldn't paper
+        // over it by silently renaming.
+        let (_, mut actor, _) = create_actor();
+        let current_pid = std::process::id();
+
+        // Seed a session with a real (non-pending) id via discovery.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::RegisterDiscovered {
+            session_id: SessionId::new("first-real-id"),
+            pid: current_pid,
+            cwd: std::path::PathBuf::from("/tmp"),
+            tmux_pane: None,
+            harness: atm_core::Harness::Pi,
+            respond_to: tx,
+        });
+        rx.await.unwrap().unwrap();
+
+        // Apply a lifecycle event with a *different* real id.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
+            session_id: SessionId::new("different-real-id"),
+            event: atm_core::LifecycleEvent::WorkingStart,
+            harness: atm_core::Harness::Pi,
+            pid: Some(current_pid),
+            tmux_pane: None,
+            respond_to: tx,
+        });
+        let _ = rx.await.unwrap();
+
+        // Original id still resolves; rename did not occur.
+        let (tx, rx) = oneshot::channel();
+        actor.handle_command(RegistryCommand::GetSession {
+            session_id: SessionId::new("first-real-id"),
+            respond_to: tx,
+        });
+        assert!(
+            rx.await.unwrap().is_some(),
+            "real id must not be renamed by another real id"
+        );
+    }
+
+    #[tokio::test]
     async fn test_subagent_start_records_pending() {
         let (_, mut actor, _) = create_actor();
 
@@ -1704,16 +1878,15 @@ mod tests {
 
         // Send SubagentStart hook event with agent_id
         let (tx, rx) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("parent-session"),
-            event_type: HookEventType::SubagentStart,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::ChildSessionStart {
+                id: Some("agent-abc-123".into()),
+                role: Some("explore".into()),
+            },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: Some("agent-abc-123".to_string()),
-            agent_type: Some("explore".to_string()),
-            prompt: None,
             respond_to: tx,
         });
 
@@ -1736,32 +1909,29 @@ mod tests {
 
         // Send SubagentStart
         let (tx, _) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("parent-session"),
-            event_type: HookEventType::SubagentStart,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::ChildSessionStart {
+                id: Some("agent-xyz-456".into()),
+                role: Some("plan".into()),
+            },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: Some("agent-xyz-456".to_string()),
-            agent_type: Some("plan".to_string()),
-            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
 
         // Send SubagentStop with same agent_id
         let (tx, rx) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("parent-session"),
-            event_type: HookEventType::SubagentStop,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::ChildSessionEnd {
+                id: Some("agent-xyz-456".into()),
+            },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: Some("agent-xyz-456".to_string()),
-            agent_type: None,
-            prompt: None,
             respond_to: tx,
         });
 
@@ -1784,16 +1954,15 @@ mod tests {
 
         // Send SubagentStart to create a pending entry
         let (tx, _) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: SessionId::new("parent-session"),
-            event_type: HookEventType::SubagentStart,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::ChildSessionStart {
+                id: Some("agent-expired".into()),
+                role: Some("explore".into()),
+            },
+            harness: atm_core::Harness::Unknown,
             pid: None,
             tmux_pane: None,
-            agent_id: Some("agent-expired".to_string()),
-            agent_type: Some("explore".to_string()),
-            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
@@ -1829,21 +1998,21 @@ mod tests {
             pid: parent_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
 
         // Send SubagentStart to create a pending correlation entry
         let (tx, _) = oneshot::channel();
-        actor.handle_command(RegistryCommand::ApplyHookEvent {
+        actor.handle_command(RegistryCommand::ApplyLifecycleEvent {
             session_id: parent_id.clone(),
-            event_type: HookEventType::SubagentStart,
-            tool_name: None,
-            notification_type: None,
+            event: LifecycleEvent::ChildSessionStart {
+                id: Some("sub-agent-001".into()),
+                role: Some("explore".into()),
+            },
+            harness: atm_core::Harness::Unknown,
             pid: Some(parent_pid),
             tmux_pane: None,
-            agent_id: Some("sub-agent-001".to_string()),
-            agent_type: Some("explore".to_string()),
-            prompt: None,
             respond_to: tx,
         });
         assert_eq!(actor.pending_subagent_count(), 1);
@@ -1863,6 +2032,7 @@ mod tests {
             pid: child_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
 
@@ -1917,6 +2087,7 @@ mod tests {
             pid: current_pid,
             cwd: std::path::PathBuf::from("/home/user/project"),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         };
         actor.handle_command(cmd);
@@ -1998,6 +2169,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2057,6 +2229,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2093,6 +2266,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2134,6 +2308,7 @@ mod tests {
             pid: current_pid,
             cwd: repo.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();
@@ -2182,6 +2357,7 @@ mod tests {
             pid: current_pid,
             cwd: repo_a.clone(),
             tmux_pane: None,
+            harness: atm_core::Harness::Unknown,
             respond_to: tx,
         });
         rx.await.unwrap().unwrap();

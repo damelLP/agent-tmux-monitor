@@ -1,0 +1,20 @@
+[package]
+name = "atm-pi-adapter"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "pi adapter for ATM — translates pi (https://pi.dev) extension events into vendor-neutral LifecycleEvent"
+
+[dependencies]
+atm-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+# Used by examples/parity_demo.rs to feed equivalent payloads through
+# both adapters and show the LifecycleEvent output is identical.
+atm-claude-adapter = { workspace = true }

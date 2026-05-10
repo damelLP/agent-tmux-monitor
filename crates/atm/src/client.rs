@@ -77,6 +77,9 @@ pub struct DaemonConfig {
 
 impl Default for DaemonConfig {
     fn default() -> Self {
+        // Honor `$ATM_SOCKET` so an isolated test daemon (and its
+        // matching atm TUI) doesn't collide with the system-wide
+        // daemon at `/tmp/atm.sock`. Mirrors `atmd` and `atm-hook`.
         Self {
             socket_path: resolve_socket_path(),
             retry_initial_delay: Duration::from_secs(1),

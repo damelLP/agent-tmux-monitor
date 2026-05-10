@@ -12,7 +12,7 @@
 
 use tokio::sync::{broadcast, mpsc, oneshot};
 
-use atm_core::{HookEventType, SessionDomain, SessionId, SessionView};
+use atm_core::{Harness, LifecycleEvent, SessionDomain, SessionId, SessionView};
 
 use super::commands::{RegistryCommand, RegistryError, SessionEvent};
 
@@ -119,49 +119,33 @@ impl RegistryHandle {
         rx.await.map_err(|_| RegistryError::ChannelClosed)?
     }
 
-    /// Apply a hook event to a session.
+    /// Apply a vendor-neutral lifecycle event to a session.
     ///
-    /// Updates the session's status based on the event type
-    /// (e.g., PreToolUse sets RunningTool, PostToolUse sets Thinking).
-    ///
-    /// # Arguments
-    ///
-    /// * `session_id` - The session to update
-    /// * `event_type` - Type of hook event
-    /// * `tool_name` - Name of the tool (for tool-related events)
-    /// * `pid` - Process ID of Claude Code (for lifecycle tracking)
-    /// * `tmux_pane` - Tmux pane ID if running in tmux
+    /// The connection layer translates raw vendor events (Claude
+    /// `RawHookEvent`, future pi extension messages) into
+    /// `LifecycleEvent` before calling this method.
     ///
     /// # Errors
     ///
     /// - `RegistryError::SessionNotFound` if the session doesn't exist
     /// - `RegistryError::ChannelClosed` if the actor has shut down
-    #[allow(clippy::too_many_arguments)]
-    pub async fn apply_hook_event(
+    pub async fn apply_lifecycle_event(
         &self,
         session_id: SessionId,
-        event_type: HookEventType,
-        tool_name: Option<String>,
-        notification_type: Option<String>,
+        event: LifecycleEvent,
+        harness: Harness,
         pid: Option<u32>,
         tmux_pane: Option<String>,
-        agent_id: Option<String>,
-        agent_type: Option<String>,
-        prompt: Option<String>,
     ) -> Result<(), RegistryError> {
         let (tx, rx) = oneshot::channel();
 
         self.sender
-            .send(RegistryCommand::ApplyHookEvent {
+            .send(RegistryCommand::ApplyLifecycleEvent {
                 session_id,
-                event_type,
-                tool_name,
-                notification_type,
+                event,
+                harness,
                 pid,
                 tmux_pane,
-                agent_id,
-                agent_type,
-                prompt,
                 respond_to: tx,
             })
             .await
@@ -252,6 +236,7 @@ impl RegistryHandle {
         pid: u32,
         cwd: std::path::PathBuf,
         tmux_pane: Option<String>,
+        harness: Harness,
     ) -> Result<(), RegistryError> {
         let (tx, rx) = oneshot::channel();
 
@@ -261,6 +246,7 @@ impl RegistryHandle {
                 pid,
                 cwd,
                 tmux_pane,
+                harness,
                 respond_to: tx,
             })
             .await
@@ -290,7 +276,7 @@ impl RegistryHandle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use atm_core::{AgentType, Model};
+    use atm_core::{AgentType, Model, Tool};
 
     fn create_test_handle() -> (RegistryHandle, mpsc::Receiver<RegistryCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::channel(16);
@@ -447,27 +433,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_apply_hook_event() {
+    async fn test_apply_lifecycle_event() {
         let (handle, mut rx) = create_test_handle();
 
         let cmd_handler = tokio::spawn(async move {
-            if let Some(RegistryCommand::ApplyHookEvent {
+            if let Some(RegistryCommand::ApplyLifecycleEvent {
                 session_id,
-                event_type,
-                tool_name,
-                notification_type,
+                event,
+                harness,
                 pid,
                 tmux_pane,
-                agent_id: _,
-                agent_type: _,
-                prompt: _,
                 respond_to,
             }) = rx.recv().await
             {
                 assert_eq!(session_id.as_str(), "test-123");
-                assert!(matches!(event_type, HookEventType::PreToolUse));
-                assert_eq!(tool_name, Some("Bash".to_string()));
-                assert_eq!(notification_type, None);
+                assert_eq!(
+                    event,
+                    LifecycleEvent::ToolCallStart {
+                        name: Tool::Bash,
+                        tool_use_id: None,
+                        input: None,
+                    }
+                );
+                assert_eq!(harness, Harness::Pi);
                 assert_eq!(pid, Some(12345));
                 assert_eq!(tmux_pane, Some("%5".to_string()));
                 let _ = respond_to.send(Ok(()));
@@ -477,16 +465,16 @@ mod tests {
         });
 
         let result = handle
-            .apply_hook_event(
+            .apply_lifecycle_event(
                 SessionId::new("test-123"),
-                HookEventType::PreToolUse,
-                Some("Bash".to_string()),
-                None, // notification_type
+                LifecycleEvent::ToolCallStart {
+                    name: Tool::Bash,
+                    tool_use_id: None,
+                    input: None,
+                },
+                Harness::Pi,
                 Some(12345),
                 Some("%5".to_string()),
-                None, // agent_id
-                None, // agent_type
-                None, // prompt
             )
             .await;
         assert!(result.is_ok());

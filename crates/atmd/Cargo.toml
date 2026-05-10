@@ -7,7 +7,7 @@ repository.workspace = true
 authors.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "ATM daemon - session registry and broadcast server for Claude Code monitoring"
+description = "ATM daemon - session registry and broadcast server for monitoring coding agents"
 readme = "../../README.md"
 # This crate is library-only. The actual `atmd` binary lives at the
 # workspace root (`src/bin/atmd.rs`) and is what `cargo install` /
@@ -22,6 +22,8 @@ path = "src/lib.rs"
 [dependencies]
 atm-core = { workspace = true }
 atm-protocol = { workspace = true }
+atm-claude-adapter = { workspace = true }
+atm-pi-adapter = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 serde = { workspace = true }

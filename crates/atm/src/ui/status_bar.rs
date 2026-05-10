@@ -72,7 +72,7 @@ pub fn render_header(frame: &mut Frame, area: Rect, app: &App) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" - Claude Code Monitor | "),
+        Span::raw(" - Agent Tmux Manager | "),
         Span::styled(status_text, status_style),
         Span::styled(stats_display, Style::default().fg(Color::DarkGray)),
     ]);

@@ -21,9 +21,18 @@ pub enum MessageType {
         data: serde_json::Value,
     },
 
-    /// Hook event from Claude Code
+    /// Hook event from Claude Code (raw `RawHookEvent` payload).
+    /// Translated by `atm-claude-adapter` at the daemon boundary.
     HookEvent {
         /// The raw hook event JSON (to be parsed)
+        data: serde_json::Value,
+    },
+
+    /// Event from a pi extension (raw `RawPiEvent` payload).
+    /// Translated by `atm-pi-adapter` at the daemon boundary.
+    /// Symmetric with [`Self::HookEvent`].
+    PiEvent {
+        /// The raw pi event JSON (to be parsed)
         data: serde_json::Value,
     },
 
@@ -83,9 +92,14 @@ impl ClientMessage {
         Self::new(MessageType::StatusUpdate { data })
     }
 
-    /// Creates a hook event message.
+    /// Creates a hook event message (Claude raw payload).
     pub fn hook_event(data: serde_json::Value) -> Self {
         Self::new(MessageType::HookEvent { data })
+    }
+
+    /// Creates a pi event message (raw pi-extension payload).
+    pub fn pi_event(data: serde_json::Value) -> Self {
+        Self::new(MessageType::PiEvent { data })
     }
 
     /// Creates a list sessions request.

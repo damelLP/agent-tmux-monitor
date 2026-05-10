@@ -1,7 +1,7 @@
 //! Session domain entities and value objects.
 
-use crate::hook::is_interactive_tool;
-use crate::{AgentType, ContextUsage, HookEventType, Model, Money, TokenCount};
+use crate::lifecycle::{LifecycleEvent, NeedsInputReason, NotificationKind};
+use crate::{AgentType, ContextUsage, Model, Money, TokenCount};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -526,6 +526,12 @@ pub struct SessionDomain {
     /// Type of agent (main, subagent, etc.)
     pub agent_type: AgentType,
 
+    /// Which coding-agent harness drives this session (Claude Code,
+    /// pi, future). Distinct from `agent_type` (which today encodes
+    /// Claude subagent role) — see `crate::harness::Harness`.
+    #[serde(default)]
+    pub harness: crate::Harness,
+
     /// Claude model being used
     pub model: Model,
 
@@ -606,6 +612,7 @@ impl SessionDomain {
         Self {
             id,
             agent_type,
+            harness: crate::Harness::default(),
             model,
             model_display_override: None,
             status: SessionStatus::Idle,
@@ -639,6 +646,8 @@ impl SessionDomain {
             AgentType::GeneralPurpose, // Default, may be updated by hook events
             model,
         );
+        // Status-line input is only emitted by Claude Code today.
+        session.harness = crate::Harness::ClaudeCode;
 
         // For unknown models, store a display name fallback:
         // prefer provider-supplied display_name, then derive from raw ID
@@ -705,59 +714,124 @@ impl SessionDomain {
         cwd_changed
     }
 
-    /// Updates status based on a hook event.
-    pub fn apply_hook_event(&mut self, event_type: HookEventType, tool_name: Option<&str>) {
+    /// Updates status from a vendor-neutral lifecycle event.
+    ///
+    /// Single source of truth for session-state transitions. Every
+    /// adapter (Claude, pi, future) funnels through this method.
+    pub fn apply_lifecycle_event(&mut self, event: &LifecycleEvent) {
         self.last_activity = Utc::now();
 
-        match event_type {
-            HookEventType::PreToolUse => {
-                if let Some(name) = tool_name {
-                    if is_interactive_tool(name) {
-                        self.status = SessionStatus::AttentionNeeded;
-                        self.current_activity = Some(ActivityDetail::new(name));
-                    } else {
-                        self.status = SessionStatus::Working;
-                        self.current_activity = Some(ActivityDetail::new(name));
-                    }
-                }
+        match event {
+            LifecycleEvent::SessionStart { .. } => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
             }
-            HookEventType::PostToolUse | HookEventType::PostToolUseFailure => {
+            LifecycleEvent::SessionEnd { .. } => {
+                // Registry removes the session; this status is rarely
+                // observed, but keep it consistent.
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            LifecycleEvent::WorkingStart => {
                 self.status = SessionStatus::Working;
-                self.current_activity = Some(ActivityDetail::thinking());
+                self.current_activity = None;
             }
-            HookEventType::UserPromptSubmit => {
+            LifecycleEvent::WorkingEnd | LifecycleEvent::Idle => {
+                self.status = SessionStatus::Idle;
+                self.current_activity = None;
+            }
+            LifecycleEvent::PromptSubmit { .. } => {
                 self.status = SessionStatus::Working;
                 self.current_activity = None;
                 // first_prompt is set separately via set_first_prompt()
             }
-            HookEventType::Stop => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::NeedsInput { reason } => {
+                self.status = SessionStatus::AttentionNeeded;
+                self.current_activity = Some(activity_for_needs_input(reason));
             }
-            HookEventType::SessionStart => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::ToolCallStart { name, .. } => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::new(name.as_str()));
             }
-            HookEventType::SessionEnd => {
-                // Session will be removed by registry
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
+            LifecycleEvent::ToolCallEnd { .. } => {
+                self.status = SessionStatus::Working;
+                self.current_activity = Some(ActivityDetail::thinking());
             }
-            HookEventType::PreCompact => {
+            LifecycleEvent::ContextCompactStart { .. } => {
                 self.status = SessionStatus::Working;
                 self.current_activity = Some(ActivityDetail::with_context("Compacting"));
             }
-            HookEventType::Setup => {
-                self.status = SessionStatus::Working;
-                self.current_activity = Some(ActivityDetail::with_context("Setup"));
+            LifecycleEvent::ContextUpdate { tokens, cost_usd } => {
+                // Pi (and future vendors) emit cumulative cost/tokens
+                // through this variant — there's no "status line"
+                // periodic update like Claude. Fold the values into
+                // the same `Session.cost` / `Session.context` fields
+                // the Claude path uses, so the TUI displays them
+                // identically regardless of vendor.
+                if let Some(c) = cost_usd {
+                    self.cost = Money::from_usd(*c);
+                }
+                if let Some(t) = tokens {
+                    // Pi reports cumulative total tokens for the
+                    // session. The TUI's percentage display reads
+                    // `context_tokens()` which sums Claude's
+                    // current_input + cache_read + cache_creation —
+                    // none of which pi populates. To make pi sessions
+                    // surface a non-zero context bar, mirror pi's
+                    // cumulative figure into `current_input_tokens`
+                    // (the largest summand of `context_tokens()`).
+                    // Also keep `total_input_tokens` set for the
+                    // detail-panel "total tokens" display, even though
+                    // it doesn't affect the percentage.
+                    let count = TokenCount::new(*t);
+                    self.context.current_input_tokens = count;
+                    self.context.total_input_tokens = count;
+                }
+                // Status unchanged: cost/token updates don't
+                // imply a state transition.
             }
-            HookEventType::Notification => {
-                // Notification handling is done separately with notification_type
-                // This is a fallback - don't change status
+            LifecycleEvent::ProviderModelChange { model, .. } => {
+                // Pi's `model_select` event fires when the user picks a
+                // provider/model in pi's UI. Update Session so the TUI
+                // stops showing `[pi] Unknown` once the user has chosen.
+                //
+                // Strategy: try to map the raw id onto our Claude-shaped
+                // `Model` enum first (in case it's a Claude model pi is
+                // talking to); fall back to `Model::Unknown` and stash
+                // the raw id in `model_display_override` for rendering.
+                if let Some(id) = model {
+                    let parsed = Model::from_id(id);
+                    self.model = parsed;
+                    self.model_display_override = if parsed.is_unknown() {
+                        Some(crate::model::derive_display_name(id))
+                    } else {
+                        None
+                    };
+                }
+                // Status unchanged: model selection is metadata only.
             }
-            HookEventType::SubagentStart | HookEventType::SubagentStop => {
-                // Subagent tracking deferred to future PR
+            LifecycleEvent::Notification { kind, .. } => {
+                if matches!(kind, Some(NotificationKind::Setup)) {
+                    self.status = SessionStatus::Working;
+                    self.current_activity = Some(ActivityDetail::with_context("Setup"));
+                }
+                // Other notifications: no status change. Permission /
+                // elicitation prompts arrive as `NeedsInput`, not
+                // `Notification`, after translation.
+            }
+            LifecycleEvent::ChildSessionStart { .. } | LifecycleEvent::ChildSessionEnd { .. } => {
+                // Child-session correlation is tracked by the registry
+                // (subagent pending-list); status remains Working.
                 self.status = SessionStatus::Working;
+            }
+        }
+    }
+
+    /// Stores the first user prompt if not already set.
+    pub fn set_first_prompt_from_event(&mut self, event: &LifecycleEvent) {
+        if let LifecycleEvent::PromptSubmit { prompt: Some(text) } = event {
+            if !text.is_empty() {
+                self.set_first_prompt(text);
             }
         }
     }
@@ -766,29 +840,6 @@ impl SessionDomain {
     pub fn set_first_prompt(&mut self, prompt: &str) {
         if self.first_prompt.is_none() && !prompt.is_empty() {
             self.first_prompt = Some(prompt.to_string());
-        }
-    }
-
-    /// Updates status based on a notification event.
-    pub fn apply_notification(&mut self, notification_type: Option<&str>) {
-        self.last_activity = Utc::now();
-
-        match notification_type {
-            Some("permission_prompt") => {
-                self.status = SessionStatus::AttentionNeeded;
-                self.current_activity = Some(ActivityDetail::with_context("Permission"));
-            }
-            Some("idle_prompt") => {
-                self.status = SessionStatus::Idle;
-                self.current_activity = None;
-            }
-            Some("elicitation_dialog") => {
-                self.status = SessionStatus::AttentionNeeded;
-                self.current_activity = Some(ActivityDetail::with_context("MCP Input"));
-            }
-            _ => {
-                // Informational notification - no status change
-            }
         }
     }
 
@@ -1008,6 +1059,29 @@ impl SessionInfrastructure {
     }
 }
 
+/// Activity-detail string for an `AttentionNeeded` state.
+fn activity_for_needs_input(reason: &NeedsInputReason) -> ActivityDetail {
+    match reason {
+        NeedsInputReason::InteractiveTool { tool } | NeedsInputReason::PermissionGate { tool } => {
+            ActivityDetail::new(tool.as_str())
+        }
+        NeedsInputReason::Notification { kind, label } => {
+            // When the vendor-supplied label is present (e.g. pi
+            // forwards the dialog title from `ctx.ui.select`), prefer
+            // it over the kind-derived static string — it tells the
+            // user what's actually being asked.
+            if let Some(text) = label.as_deref() {
+                return ActivityDetail::with_context(text);
+            }
+            match kind {
+                NotificationKind::PermissionPrompt => ActivityDetail::with_context("Permission"),
+                NotificationKind::ElicitationDialog => ActivityDetail::with_context("MCP Input"),
+                other => ActivityDetail::with_context(other.as_str()),
+            }
+        }
+    }
+}
+
 /// Reads the process start time using the procfs crate.
 ///
 /// The start time (in clock ticks since boot) is stable for the lifetime
@@ -1044,6 +1118,11 @@ pub struct SessionView {
 
     /// Agent type label
     pub agent_type: String,
+
+    /// Coding-agent harness short tag (`"claude"`, `"pi"`, `"?"`).
+    /// Drives the vendor badge in the TUI.
+    #[serde(default)]
+    pub harness: String,
 
     /// Model display name
     pub model: String,
@@ -1147,6 +1226,7 @@ impl SessionView {
             id: session.id.clone(),
             id_short: session.id.short().to_string(),
             agent_type: session.agent_type.short_name().to_string(),
+            harness: session.harness.short_tag().to_string(),
             model: if session.model.is_unknown() {
                 session
                     .model_display_override
@@ -1225,6 +1305,7 @@ fn format_duration(duration: chrono::Duration) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tool::Tool;
 
     /// Creates a test session with default values.
     fn create_test_session(id: &str) -> SessionDomain {
@@ -1363,12 +1444,67 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_hook_event_interactive_tool() {
+    fn lifecycle_provider_model_change_known_claude_id() {
+        // A pi session targeting a Claude model should map onto the
+        // existing Model variant; no override needed.
+        let mut session = create_test_session("test-pmc-known");
+        session.model = Model::Unknown;
+        session.model_display_override = Some("stale".to_string());
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+        });
+
+        assert_eq!(session.model, Model::Sonnet45);
+        assert!(
+            session.model_display_override.is_none(),
+            "override must be cleared when the id maps to a known model"
+        );
+    }
+
+    #[test]
+    fn lifecycle_provider_model_change_unknown_id() {
+        // A pi session pointed at a non-Claude provider should land
+        // as Unknown with the raw id surfaced via the override field
+        // so the TUI shows something meaningful instead of "Unknown".
+        let mut session = create_test_session("test-pmc-unknown");
+        session.model = Model::Unknown;
+        session.model_display_override = None;
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4o".to_string()),
+        });
+
+        assert_eq!(session.model, Model::Unknown);
+        assert_eq!(session.model_display_override.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn lifecycle_provider_model_change_no_model_is_noop() {
+        let mut session = create_test_session("test-pmc-none");
+        session.model = Model::Sonnet4;
+        session.model_display_override = None;
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("anthropic".to_string()),
+            model: None,
+        });
+
+        assert_eq!(session.model, Model::Sonnet4);
+        assert!(session.model_display_override.is_none());
+    }
+
+    #[test]
+    fn lifecycle_needs_input_for_interactive_tool() {
         let mut session = create_test_session("test-interactive");
 
-        // PreToolUse with interactive tool → AttentionNeeded
-        session.apply_hook_event(HookEventType::PreToolUse, Some("AskUserQuestion"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::InteractiveTool {
+                tool: Tool::AskUserQuestion,
+            },
+        });
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
             session
@@ -1379,18 +1515,23 @@ mod tests {
             Some("AskUserQuestion")
         );
 
-        // PostToolUse → back to Working (thinking)
-        session.apply_hook_event(HookEventType::PostToolUse, None);
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallEnd {
+            name: Tool::AskUserQuestion,
+            tool_use_id: None,
+            is_error: false,
+        });
         assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
-    fn test_apply_hook_event_enter_plan_mode() {
+    fn lifecycle_needs_input_for_enter_plan_mode() {
         let mut session = create_test_session("test-plan");
 
-        // EnterPlanMode is also interactive
-        session.apply_hook_event(HookEventType::PreToolUse, Some("EnterPlanMode"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::InteractiveTool {
+                tool: Tool::EnterPlanMode,
+            },
+        });
         assert_eq!(session.status, SessionStatus::AttentionNeeded);
         assert_eq!(
             session
@@ -1403,12 +1544,77 @@ mod tests {
     }
 
     #[test]
-    fn test_apply_hook_event_standard_tool() {
+    fn lifecycle_needs_input_notification_uses_label_when_present() {
+        // The `label` plumbing exists so the TUI shows *what* permission
+        // is being asked (the dialog title forwarded by pi-atm's
+        // `ctx.ui.select` wrapper) instead of a generic kind string.
+        let mut session = create_test_session("test-label");
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::PermissionPrompt,
+                label: Some("Allow `rm -rf /tmp/cache`?".into()),
+            },
+        });
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("Allow `rm -rf /tmp/cache`?")
+        );
+    }
+
+    #[test]
+    fn lifecycle_needs_input_notification_falls_back_to_kind_when_label_absent() {
+        // Claude `Notification(permission_prompt)` events don't carry a
+        // per-prompt label — only a kind tag. Verify the fallback
+        // rendering still resolves to the kind-derived string.
+        let mut session = create_test_session("test-no-label");
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::PermissionPrompt,
+                label: None,
+            },
+        });
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("Permission")
+        );
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::ElicitationDialog,
+                label: None,
+            },
+        });
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("MCP Input")
+        );
+    }
+
+    #[test]
+    fn lifecycle_tool_call_start_for_standard_tool() {
         let mut session = create_test_session("test-standard");
 
-        // PreToolUse with standard tool → Working
-        session.apply_hook_event(HookEventType::PreToolUse, Some("Bash"));
-
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallStart {
+            name: Tool::Bash,
+            tool_use_id: None,
+            input: None,
+        });
         assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
             session
@@ -1419,34 +1625,35 @@ mod tests {
             Some("Bash")
         );
 
-        // PostToolUse → still Working (thinking)
-        session.apply_hook_event(HookEventType::PostToolUse, Some("Bash"));
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallEnd {
+            name: Tool::Bash,
+            tool_use_id: None,
+            is_error: false,
+        });
         assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
-    fn test_apply_hook_event_none_tool_name() {
-        let mut session = create_test_session("test-none");
-        let original_status = session.status;
+    fn lifecycle_unknown_tool_lands_in_other_and_keeps_name() {
+        // The empty/unknown case used to be "standard tool with empty name".
+        // After typing, the same input becomes Tool::Other("") — the session
+        // still treats it as a working tool call without crashing on missing data.
+        let mut session = create_test_session("test-other");
 
-        // PreToolUse with None tool name should not change status
-        session.apply_hook_event(HookEventType::PreToolUse, None);
-
+        session.apply_lifecycle_event(&LifecycleEvent::ToolCallStart {
+            name: Tool::Other("custom_pi_tool".into()),
+            tool_use_id: None,
+            input: None,
+        });
+        assert_eq!(session.status, SessionStatus::Working);
         assert_eq!(
-            session.status, original_status,
-            "PreToolUse with None tool_name should not change status"
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("custom_pi_tool")
         );
-    }
-
-    #[test]
-    fn test_apply_hook_event_empty_tool_name() {
-        let mut session = create_test_session("test-empty");
-
-        // Empty string tool name - should be treated as standard tool
-        // (is_interactive_tool returns false for empty strings)
-        session.apply_hook_event(HookEventType::PreToolUse, Some(""));
-
-        assert_eq!(session.status, SessionStatus::Working);
     }
 
     #[test]
