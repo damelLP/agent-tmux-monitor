@@ -8,9 +8,8 @@
 //!
 //! Distinct from `AgentType` (which currently enumerates Claude
 //! subagent roles like `Explore`/`Plan`/`GeneralPurpose` —
-//! misleadingly named, see bead `agent-tmux-manager-cag` for the
-//! planned rename to `ClaudeSubagentRole`). `Harness` is the actual
-//! harness identity.
+//! misleadingly named; the harness axis lives here, not on
+//! `AgentType`). `Harness` is the actual harness identity.
 //!
 //! Set at session-creation time by whichever adapter is feeding the
 //! daemon (Claude adapter → `ClaudeCode`; pi adapter → `Pi`; pure

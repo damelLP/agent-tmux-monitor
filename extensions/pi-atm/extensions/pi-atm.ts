@@ -211,7 +211,10 @@ function buildEnvelope(eventName: string, payload: unknown, sessionId: string | 
  * If patching fails (different pi version, future API change), we log
  * and proceed — the rest of the extension still works.
  */
-function patchUiSelectOnce(ctx: unknown, sessionId: string | undefined): void {
+function patchUiSelectOnce(
+	ctx: unknown,
+	getSessionId: () => string | undefined,
+): void {
 	const ctxAny = ctx as { ui?: { select?: unknown; __atmPatched?: boolean } };
 	const ui = ctxAny.ui;
 	if (!ui || typeof ui.select !== "function") {
@@ -225,17 +228,21 @@ function patchUiSelectOnce(ctx: unknown, sessionId: string | undefined): void {
 		opts?: unknown,
 	) => Promise<string | undefined>;
 
+	// Note: `getSessionId` is a getter, not a value. It is read on every
+	// `select` call so synthetic events still carry the correct session
+	// id even when patching happens before `currentSessionId` is set
+	// (e.g. before the first `session_start` event fires).
 	ui.select = async function patchedSelect(
 		title: string,
 		options: string[],
 		opts?: unknown,
 	): Promise<string | undefined> {
 		logDebug(`ui.select intercepted: ${title.slice(0, 80)}`);
-		void send(buildEnvelope("atm_needs_input_open", { title }, sessionId));
+		void send(buildEnvelope("atm_needs_input_open", { title }, getSessionId()));
 		try {
 			return await originalSelect(title, options, opts);
 		} finally {
-			void send(buildEnvelope("atm_needs_input_resolved", {}, sessionId));
+			void send(buildEnvelope("atm_needs_input_resolved", {}, getSessionId()));
 		}
 	};
 	ui.__atmPatched = true;
@@ -268,8 +275,10 @@ export default function (pi: ExtensionAPI): void {
 				if (!uiPatched) {
 					// Patch `ctx.ui.select` once, the first time we have a ctx.
 					// We do it lazily because at extension-load time the runner
-					// may not have its ui bound yet.
-					patchUiSelectOnce(ctx, cachedSessionId);
+					// may not have its ui bound yet. Pass a getter so the patched
+					// closure always reads the current `cachedSessionId`, even if
+					// patching ran before the id was discovered.
+					patchUiSelectOnce(ctx, () => cachedSessionId);
 					uiPatched = true;
 				}
 				const envelope = buildEnvelope(eventName, payload, cachedSessionId);

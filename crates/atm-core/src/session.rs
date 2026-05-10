@@ -528,8 +528,7 @@ pub struct SessionDomain {
 
     /// Which coding-agent harness drives this session (Claude Code,
     /// pi, future). Distinct from `agent_type` (which today encodes
-    /// Claude subagent role) — see `crate::harness::Harness` and bead
-    /// `agent-tmux-manager-cag` for the planned `AgentType` rename.
+    /// Claude subagent role) — see `crate::harness::Harness`.
     #[serde(default)]
     pub harness: crate::Harness,
 
@@ -786,14 +785,25 @@ impl SessionDomain {
                 // Status unchanged: cost/token updates don't
                 // imply a state transition.
             }
-            LifecycleEvent::ProviderModelChange { .. } => {
-                // Metadata-only update; the model field on the Session
-                // is set at construction today, derived from a Claude
-                // status-line snapshot. Pi mid-session model_select
-                // events fire here; updating Session.model would
-                // require ProviderModelChange to also reach into the
-                // Model enum (which is Claude-shaped). Defer to the
-                // model-axis-decoupling work in `cag`.
+            LifecycleEvent::ProviderModelChange { model, .. } => {
+                // Pi's `model_select` event fires when the user picks a
+                // provider/model in pi's UI. Update Session so the TUI
+                // stops showing `[pi] Unknown` once the user has chosen.
+                //
+                // Strategy: try to map the raw id onto our Claude-shaped
+                // `Model` enum first (in case it's a Claude model pi is
+                // talking to); fall back to `Model::Unknown` and stash
+                // the raw id in `model_display_override` for rendering.
+                if let Some(id) = model {
+                    let parsed = Model::from_id(id);
+                    self.model = parsed;
+                    self.model_display_override = if parsed.is_unknown() {
+                        Some(crate::model::derive_display_name(id))
+                    } else {
+                        None
+                    };
+                }
+                // Status unchanged: model selection is metadata only.
             }
             LifecycleEvent::Notification { kind, .. } => {
                 if matches!(kind, Some(NotificationKind::Setup)) {
@@ -1417,6 +1427,59 @@ mod tests {
     fn test_session_id_pending_pid_returns_none_for_invalid_pid() {
         let id = SessionId::new("pending-not-a-number");
         assert_eq!(id.pending_pid(), None);
+    }
+
+    #[test]
+    fn lifecycle_provider_model_change_known_claude_id() {
+        // A pi session targeting a Claude model should map onto the
+        // existing Model variant; no override needed.
+        let mut session = create_test_session("test-pmc-known");
+        session.model = Model::Unknown;
+        session.model_display_override = Some("stale".to_string());
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("anthropic".to_string()),
+            model: Some("claude-sonnet-4-5-20250929".to_string()),
+        });
+
+        assert_eq!(session.model, Model::Sonnet45);
+        assert!(
+            session.model_display_override.is_none(),
+            "override must be cleared when the id maps to a known model"
+        );
+    }
+
+    #[test]
+    fn lifecycle_provider_model_change_unknown_id() {
+        // A pi session pointed at a non-Claude provider should land
+        // as Unknown with the raw id surfaced via the override field
+        // so the TUI shows something meaningful instead of "Unknown".
+        let mut session = create_test_session("test-pmc-unknown");
+        session.model = Model::Unknown;
+        session.model_display_override = None;
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("openai".to_string()),
+            model: Some("gpt-4o".to_string()),
+        });
+
+        assert_eq!(session.model, Model::Unknown);
+        assert_eq!(session.model_display_override.as_deref(), Some("gpt-4o"));
+    }
+
+    #[test]
+    fn lifecycle_provider_model_change_no_model_is_noop() {
+        let mut session = create_test_session("test-pmc-none");
+        session.model = Model::Sonnet4;
+        session.model_display_override = None;
+
+        session.apply_lifecycle_event(&LifecycleEvent::ProviderModelChange {
+            provider: Some("anthropic".to_string()),
+            model: None,
+        });
+
+        assert_eq!(session.model, Model::Sonnet4);
+        assert!(session.model_display_override.is_none());
     }
 
     #[test]

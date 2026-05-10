@@ -472,15 +472,22 @@ impl ConnectionHandler {
         };
 
         // Pi events identify their session via the extension-injected
-        // `session_id` field. Fall back to a synthetic id derived from
-        // pid if absent (matches Claude path's behavior for the
-        // create-on-first-event flow).
-        let session_id = atm_core::SessionId::new(
-            raw_event
-                .session_id
-                .as_deref()
-                .unwrap_or("pi-session-unknown"),
-        );
+        // `session_id` field. If absent (early events, before pi's
+        // `session_start` fires), derive a pending id from the pid so
+        // two pi processes don't collide on a shared sentinel id —
+        // matches Claude's `pending_from_pid` discovery pattern.
+        // Reject events that have neither: nothing to attribute them to.
+        let session_id = match raw_event.session_id.as_deref() {
+            Some(s) => atm_core::SessionId::new(s),
+            None => raw_event
+                .pid
+                .map(atm_core::SessionId::pending_from_pid)
+                .ok_or_else(|| {
+                    ConnectionError::ParseError(
+                        "pi event missing both session_id and pid; cannot attribute".to_string(),
+                    )
+                })?,
+        };
 
         self.registry
             .apply_lifecycle_event(
