@@ -397,30 +397,19 @@ impl RegistryActor {
             return Err(RegistryError::RegistryFull { max: MAX_SESSIONS });
         }
 
-        // Create minimal session with defaults (genuinely new process)
-        use atm_core::{AgentType, Model};
-        let mut session = SessionDomain::new(
+        // Create minimal session with defaults (genuinely new process).
+        // Agent type and model will be updated when the status line arrives.
+        // Harness tag comes from whichever discoverer matched (Claude, pi,
+        // future); subsequent adapter events can refine but not change identity.
+        use atm_core::Model;
+        let session = build_session_from_pid(
             session_id.clone(),
-            AgentType::GeneralPurpose, // Will be updated when status line arrives
-            Model::Unknown,            // Will be updated when status line arrives
+            AgentType::GeneralPurpose,
+            Model::Unknown,
+            harness,
+            tmux_pane,
+            Some(cwd),
         );
-        // Tag the session with whichever harness the discoverer
-        // matched (Claude, pi, future). The TUI uses this for the
-        // vendor badge; subsequent adapter events can refine it but
-        // not change identity.
-        session.harness = harness;
-        // Resolve project/worktree from working directory.
-        // Note: these are local stat() calls walking up ~5 dirs (~5μs),
-        // acceptable inline per Tokio guidelines for sub-100μs sync work.
-        let cwd_str = cwd.to_string_lossy().to_string();
-        session.project_root = atm_core::resolve_project_root(&cwd_str);
-        let (wt_path, wt_branch) = atm_core::resolve_worktree_info(&cwd_str);
-        session.worktree_path = wt_path;
-        session.worktree_branch = wt_branch;
-        // Set working directory (move, no clone needed)
-        session.working_directory = Some(cwd_str);
-        // Set tmux pane from discovery
-        session.tmux_pane = tmux_pane;
         let agent_type = session.agent_type.clone();
 
         // Create new infrastructure with PID
@@ -766,35 +755,21 @@ impl RegistryActor {
                             event = ?event,
                             "Creating session from lifecycle event"
                         );
-                        use atm_core::{AgentType, Model};
-                        let mut session = SessionDomain::new(
+                        // Read cwd from /proc/{pid}/cwd so a session created
+                        // via a vendor adapter event lands grouped under the
+                        // right project / branch from frame one. Without this,
+                        // lifecycle-event-created sessions fall into the
+                        // "Other" tree bucket because working_directory is None.
+                        let proc_cwd = std::fs::read_link(format!("/proc/{p}/cwd")).ok();
+                        use atm_core::Model;
+                        let session = build_session_from_pid(
                             session_id.clone(),
                             AgentType::GeneralPurpose,
                             Model::Unknown,
+                            harness,
+                            tmux_pane.clone(),
+                            proc_cwd,
                         );
-                        session.harness = harness;
-                        session.tmux_pane = tmux_pane.clone();
-
-                        // Read cwd from /proc/{pid}/cwd and resolve
-                        // project/worktree info — mirrors what
-                        // `handle_register_discovered` does for
-                        // /proc-discovered sessions, so a session
-                        // created via a vendor adapter event lands
-                        // grouped under the right project / branch
-                        // from frame one. Without this, lifecycle-
-                        // event-created sessions fall into the
-                        // "Other" tree bucket because their
-                        // working_directory is None.
-                        let proc_cwd = std::fs::read_link(format!("/proc/{p}/cwd")).ok();
-                        if let Some(cwd) = &proc_cwd {
-                            let cwd_str = cwd.to_string_lossy().to_string();
-                            session.project_root = atm_core::resolve_project_root(&cwd_str);
-                            let (wt_path, wt_branch) =
-                                atm_core::resolve_worktree_info(&cwd_str);
-                            session.worktree_path = wt_path;
-                            session.worktree_branch = wt_branch;
-                            session.working_directory = Some(cwd_str);
-                        }
 
                         let mut infra = SessionInfrastructure::new();
                         infra.set_pid(p);
@@ -1114,6 +1089,40 @@ impl RegistryActor {
     pub fn pending_subagent_count(&self) -> usize {
         self.pending_subagents.len()
     }
+}
+
+/// Builds a fresh `SessionDomain` for a newly-observed PID and resolves
+/// cwd-derived fields (project root, worktree info, working directory).
+///
+/// Used by both the /proc-discovery path (`handle_register_discovered`)
+/// and the create-on-event path inside `handle_apply_lifecycle_event` so
+/// that sessions land grouped under the right project / branch from frame
+/// one regardless of how they were first observed.
+///
+/// When `cwd` is `None` (e.g., `/proc/{pid}/cwd` read failed) the
+/// project/worktree/working_directory fields are left at their defaults.
+fn build_session_from_pid(
+    session_id: SessionId,
+    agent_type: AgentType,
+    model: atm_core::Model,
+    harness: atm_core::Harness,
+    tmux_pane: Option<String>,
+    cwd: Option<PathBuf>,
+) -> SessionDomain {
+    let mut session = SessionDomain::new(session_id, agent_type, model);
+    session.harness = harness;
+    session.tmux_pane = tmux_pane;
+    if let Some(cwd) = cwd {
+        // Note: resolve_* are local stat() calls walking up ~5 dirs (~5μs),
+        // acceptable inline per Tokio guidelines for sub-100μs sync work.
+        let cwd_str = cwd.to_string_lossy().to_string();
+        session.project_root = atm_core::resolve_project_root(&cwd_str);
+        let (wt_path, wt_branch) = atm_core::resolve_worktree_info(&cwd_str);
+        session.worktree_path = wt_path;
+        session.worktree_branch = wt_branch;
+        session.working_directory = Some(cwd_str);
+    }
+    session
 }
 
 /// Extracts a tool name from a `LifecycleEvent`, when present.
