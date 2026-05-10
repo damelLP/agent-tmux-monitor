@@ -79,8 +79,42 @@ function logDebug(msg: string): void {
  */
 let activeSocket: net.Socket | null = null;
 let pendingSocket: net.Socket | null = null;
-const outbox: string[] = [];
 let reconnectScheduled = false;
+
+/**
+ * Bounded FIFO of outgoing event lines waiting for a usable socket.
+ *
+ * The cap exists so that an extended atmd outage in a long pi session
+ * doesn't grow this array without limit. Pi context events can be
+ * tens to hundreds of KB and fire frequently; an unbounded buffer
+ * would let one wedged daemon eat the pi process's heap.
+ *
+ * Drop-oldest: when full, the *oldest* queued line is discarded so
+ * the most recent state survives. Recent events are more useful for
+ * "what is this session doing now" than stale ones from minutes ago,
+ * and atmd's discovery scan reseeds the live registry on reconnect
+ * regardless of what we managed to deliver.
+ *
+ * 256 is a small cap by design — at peak event rates this is seconds
+ * of buffering, enough to ride out an atmd restart but not enough to
+ * accumulate megabytes during a real outage.
+ */
+const OUTBOX_MAX = 256;
+const outbox: string[] = [];
+let outboxDropped = 0;
+
+function enqueue(line: string): void {
+	outbox.push(line);
+	while (outbox.length > OUTBOX_MAX) {
+		outbox.shift();
+		outboxDropped++;
+		// Log on each power-of-two boundary so chronic drops surface
+		// without spamming the log on every overflow.
+		if ((outboxDropped & (outboxDropped - 1)) === 0) {
+			logDebug(`outbox over cap: dropped ${outboxDropped} event(s) total`);
+		}
+	}
+}
 
 function openSocket(): void {
 	if (activeSocket || pendingSocket) return;
@@ -165,17 +199,17 @@ function send(envelope: unknown): void {
 
 	if (pendingSocket) {
 		// Queue until connect fires.
-		outbox.push(line);
+		enqueue(line);
 		return;
 	}
 
 	if (!reconnectScheduled) {
-		outbox.push(line);
+		enqueue(line);
 		openSocket();
 	}
-	// If reconnect is back-off-pending, we drop the event silently.
-	// (Bounded outbox would be a future hardening — today's worst case
-	// is a backed-up outbox while atmd is down for the full session.)
+	// If reconnect is back-off-pending, drop on the floor — the next
+	// send() after the back-off clears will trigger a fresh
+	// openSocket() and the bounded outbox covers buffering from then.
 }
 
 /**
