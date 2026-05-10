@@ -162,9 +162,9 @@ impl RawPiEvent {
             // Suppress: paired with tool_execution_end.
             PiEventType::ToolResult => return None,
 
-            PiEventType::SessionBeforeCompact => LifecycleEvent::ContextCompactStart {
-                trigger: None,
-            },
+            PiEventType::SessionBeforeCompact => {
+                LifecycleEvent::ContextCompactStart { trigger: None }
+            }
 
             PiEventType::ModelSelect => LifecycleEvent::ProviderModelChange {
                 provider: p.provider.clone(),
@@ -313,10 +313,7 @@ mod tests {
         // After the dialog closes, pi resumes work — WorkingStart
         // transitions the session out of NeedsInput.
         let e = raw(PiEventType::AtmNeedsInputResolved, PiPayload::default());
-        assert_eq!(
-            e.to_lifecycle_event(),
-            Some(LifecycleEvent::WorkingStart)
-        );
+        assert_eq!(e.to_lifecycle_event(), Some(LifecycleEvent::WorkingStart));
     }
 
     #[test]

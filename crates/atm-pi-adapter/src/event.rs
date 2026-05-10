@@ -128,9 +128,11 @@ impl fmt::Display for PiEventType {
     }
 }
 
-impl From<&str> for PiEventType {
-    fn from(s: &str) -> Self {
-        match s {
+impl PiEventType {
+    /// Canonical lookup for known variants. Returns `None` for event
+    /// names that should fall through to `Other(_)`.
+    fn try_from_known(s: &str) -> Option<Self> {
+        Some(match s {
             "session_start" => Self::SessionStart,
             "session_before_switch" => Self::SessionBeforeSwitch,
             "session_before_fork" => Self::SessionBeforeFork,
@@ -161,46 +163,21 @@ impl From<&str> for PiEventType {
             "input" => Self::Input,
             "atm_needs_input_open" => Self::AtmNeedsInputOpen,
             "atm_needs_input_resolved" => Self::AtmNeedsInputResolved,
-            other => Self::Other(other.to_string()),
-        }
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for PiEventType {
+    fn from(s: &str) -> Self {
+        Self::try_from_known(s).unwrap_or_else(|| Self::Other(s.to_string()))
     }
 }
 
 impl From<String> for PiEventType {
     fn from(s: String) -> Self {
-        match s.as_str() {
-            "session_start" => Self::SessionStart,
-            "session_before_switch" => Self::SessionBeforeSwitch,
-            "session_before_fork" => Self::SessionBeforeFork,
-            "session_before_compact" => Self::SessionBeforeCompact,
-            "session_compact" => Self::SessionCompact,
-            "session_shutdown" => Self::SessionShutdown,
-            "session_before_tree" => Self::SessionBeforeTree,
-            "session_tree" => Self::SessionTree,
-            "resources_discover" => Self::ResourcesDiscover,
-            "context" => Self::Context,
-            "before_provider_request" => Self::BeforeProviderRequest,
-            "after_provider_response" => Self::AfterProviderResponse,
-            "before_agent_start" => Self::BeforeAgentStart,
-            "agent_start" => Self::AgentStart,
-            "agent_end" => Self::AgentEnd,
-            "turn_start" => Self::TurnStart,
-            "turn_end" => Self::TurnEnd,
-            "message_start" => Self::MessageStart,
-            "message_update" => Self::MessageUpdate,
-            "message_end" => Self::MessageEnd,
-            "tool_execution_start" => Self::ToolExecutionStart,
-            "tool_execution_update" => Self::ToolExecutionUpdate,
-            "tool_execution_end" => Self::ToolExecutionEnd,
-            "tool_call" => Self::ToolCall,
-            "tool_result" => Self::ToolResult,
-            "model_select" => Self::ModelSelect,
-            "user_bash" => Self::UserBash,
-            "input" => Self::Input,
-            "atm_needs_input_open" => Self::AtmNeedsInputOpen,
-            "atm_needs_input_resolved" => Self::AtmNeedsInputResolved,
-            _ => Self::Other(s),
-        }
+        // Reuse the owned String on the Other path to avoid re-allocation.
+        Self::try_from_known(&s).unwrap_or(Self::Other(s))
     }
 }
 

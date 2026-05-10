@@ -24,8 +24,8 @@ use tokio::time::timeout;
 use tracing::{debug, error, info, warn};
 
 use atm_claude_adapter::RawHookEvent;
-use atm_pi_adapter::RawPiEvent;
 use atm_core::SessionId;
+use atm_pi_adapter::RawPiEvent;
 use atm_protocol::{ClientMessage, DaemonMessage, MessageType, ProtocolVersion};
 
 use crate::discovery::{DiscoveryResult, DiscoveryService};

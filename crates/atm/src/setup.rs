@@ -14,7 +14,7 @@
 use std::fs;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -24,8 +24,7 @@ const ATM_HOOK_SCRIPT: &str = include_str!("../scripts/atm-hook");
 
 /// The pi-atm TypeScript extension content, embedded at compile time.
 /// pi loads `.ts` files directly via `@mariozechner/jiti`.
-const PI_ATM_EXTENSION: &str =
-    include_str!("../../../extensions/pi-atm/extensions/pi-atm.ts");
+const PI_ATM_EXTENSION: &str = include_str!("../../../extensions/pi-atm/extensions/pi-atm.ts");
 
 /// Package manifest written next to the embedded extension. Pi looks
 /// at the `pi.extensions` array (not `main`) to discover extension
@@ -61,32 +60,41 @@ fn hook_script_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/usr/local/bin/atm-hook"))
 }
 
-/// Reads Claude Code settings, returns empty object if file doesn't exist
-fn read_settings() -> Result<Value> {
-    let path = claude_settings_path().context("Could not determine home directory")?;
-
+/// Reads a JSON file at `path`, returning an empty object if the file
+/// does not exist. Errors carry the path for diagnostics.
+fn read_json_file_or_empty(path: &Path) -> Result<Value> {
     if !path.exists() {
         return Ok(json!({}));
     }
 
     let content =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path.display()))?;
 
     serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
 }
 
-/// Writes Claude Code settings
-fn write_settings(settings: &Value) -> Result<()> {
-    let path = claude_settings_path().context("Could not determine home directory")?;
-
-    // Ensure .claude directory exists
+/// Writes `value` to `path` as pretty-printed JSON, creating parent
+/// directories as needed. Errors carry the path for diagnostics.
+fn write_json_file_pretty(path: &Path, value: &Value) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
 
-    let content = serde_json::to_string_pretty(settings)?;
-    fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+    let content = serde_json::to_string_pretty(value)?;
+    fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+/// Reads Claude Code settings, returns empty object if file doesn't exist
+fn read_settings() -> Result<Value> {
+    let path = claude_settings_path().context("Could not determine home directory")?;
+    read_json_file_or_empty(&path)
+}
+
+/// Writes Claude Code settings
+fn write_settings(settings: &Value) -> Result<()> {
+    let path = claude_settings_path().context("Could not determine home directory")?;
+    write_json_file_pretty(&path, settings)
 }
 
 /// Creates the statusLine configuration entry.
@@ -296,22 +304,12 @@ fn pi_settings_path() -> Option<PathBuf> {
 /// Reads pi's settings.json. Returns an empty object if not present.
 fn read_pi_settings() -> Result<Value> {
     let path = pi_settings_path().context("Could not determine home directory")?;
-    if !path.exists() {
-        return Ok(json!({}));
-    }
-    let content =
-        fs::read_to_string(&path).with_context(|| format!("Failed to read {}", path.display()))?;
-    serde_json::from_str(&content).with_context(|| format!("Failed to parse {}", path.display()))
+    read_json_file_or_empty(&path)
 }
 
 fn write_pi_settings(settings: &Value) -> Result<()> {
     let path = pi_settings_path().context("Could not determine home directory")?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
-    let content = serde_json::to_string_pretty(settings)?;
-    fs::write(&path, content).with_context(|| format!("Failed to write {}", path.display()))
+    write_json_file_pretty(&path, settings)
 }
 
 /// Writes the embedded pi-atm extension files to

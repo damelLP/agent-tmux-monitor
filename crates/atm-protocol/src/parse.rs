@@ -425,5 +425,4 @@ mod tests {
         assert!((session.cost.as_usd() - 0.0).abs() < 0.001);
         assert_eq!(session.context.total_input_tokens.as_u64(), 0);
     }
-
 }

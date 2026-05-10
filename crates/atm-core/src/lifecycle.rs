@@ -76,29 +76,31 @@ impl std::fmt::Display for NotificationKind {
     }
 }
 
-impl From<&str> for NotificationKind {
-    fn from(s: &str) -> Self {
-        match s {
+impl NotificationKind {
+    /// Canonical lookup for known variants. Returns `None` for inputs
+    /// that should fall through to `Other(_)`.
+    fn try_from_known(s: &str) -> Option<Self> {
+        Some(match s {
             "permission_prompt" => Self::PermissionPrompt,
             "elicitation_dialog" => Self::ElicitationDialog,
             "idle_prompt" => Self::IdlePrompt,
             "setup" => Self::Setup,
             "info" => Self::Info,
-            other => Self::Other(other.to_string()),
-        }
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for NotificationKind {
+    fn from(s: &str) -> Self {
+        Self::try_from_known(s).unwrap_or_else(|| Self::Other(s.to_string()))
     }
 }
 
 impl From<String> for NotificationKind {
     fn from(s: String) -> Self {
-        match s.as_str() {
-            "permission_prompt" => Self::PermissionPrompt,
-            "elicitation_dialog" => Self::ElicitationDialog,
-            "idle_prompt" => Self::IdlePrompt,
-            "setup" => Self::Setup,
-            "info" => Self::Info,
-            _ => Self::Other(s),
-        }
+        // Reuse the owned String on the Other path to avoid re-allocation.
+        Self::try_from_known(&s).unwrap_or(Self::Other(s))
     }
 }
 

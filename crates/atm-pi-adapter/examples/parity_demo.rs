@@ -16,7 +16,11 @@ use atm_core::{AgentType, Model, SessionDomain, SessionId};
 use atm_pi_adapter::RawPiEvent;
 
 fn fresh_session() -> SessionDomain {
-    SessionDomain::new(SessionId::new("demo"), AgentType::GeneralPurpose, Model::Sonnet4)
+    SessionDomain::new(
+        SessionId::new("demo"),
+        AgentType::GeneralPurpose,
+        Model::Sonnet4,
+    )
 }
 
 fn main() {

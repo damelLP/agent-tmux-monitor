@@ -162,8 +162,8 @@ impl RegistryActor {
                 tmux_pane,
                 respond_to,
             } => {
-                let result = self
-                    .handle_apply_lifecycle_event(session_id, event, harness, pid, tmux_pane);
+                let result =
+                    self.handle_apply_lifecycle_event(session_id, event, harness, pid, tmux_pane);
                 let _ = respond_to.send(result);
             }
             RegistryCommand::GetSession {
@@ -673,7 +673,10 @@ impl RegistryActor {
     ) -> Result<(), RegistryError> {
         // Subagent correlation: ChildSessionStart records, ChildSessionEnd removes.
         match &event {
-            LifecycleEvent::ChildSessionStart { id: Some(aid), role } => {
+            LifecycleEvent::ChildSessionStart {
+                id: Some(aid),
+                role,
+            } => {
                 let resolved_parent_pid = pid
                     .or_else(|| self.session_id_to_pid.get(&session_id).copied())
                     .unwrap_or(0);

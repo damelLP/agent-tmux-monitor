@@ -96,12 +96,12 @@ impl std::fmt::Display for Tool {
     }
 }
 
-impl From<&str> for Tool {
-    fn from(s: &str) -> Self {
-        // Trim leading/trailing whitespace so " Bash " still resolves
-        // to the canonical variant — preserves earlier `is_interactive_tool`
-        // tolerance behavior.
-        match s.trim() {
+impl Tool {
+    /// Canonical lookup for known variants. Returns `None` for anything
+    /// that should fall through to `Other(_)`. Input should already be
+    /// trimmed by the caller.
+    fn try_from_known(s: &str) -> Option<Self> {
+        Some(match s {
             "AskUserQuestion" => Self::AskUserQuestion,
             "EnterPlanMode" => Self::EnterPlanMode,
             "ExitPlanMode" => Self::ExitPlanMode,
@@ -117,8 +117,18 @@ impl From<&str> for Tool {
             "TodoWrite" => Self::TodoWrite,
             "NotebookEdit" => Self::NotebookEdit,
             "NotebookRead" => Self::NotebookRead,
-            other => Self::Other(other.to_string()),
-        }
+            _ => return None,
+        })
+    }
+}
+
+impl From<&str> for Tool {
+    fn from(s: &str) -> Self {
+        // Trim leading/trailing whitespace so " Bash " still resolves
+        // to the canonical variant — preserves earlier `is_interactive_tool`
+        // tolerance behavior.
+        let trimmed = s.trim();
+        Self::try_from_known(trimmed).unwrap_or_else(|| Self::Other(trimmed.to_string()))
     }
 }
 
@@ -126,32 +136,15 @@ impl From<String> for Tool {
     fn from(s: String) -> Self {
         // Avoid allocation when we hit a known variant by checking the
         // borrow first; only fall back to consuming the String on Other.
-        match s.trim() {
-            "AskUserQuestion" => Self::AskUserQuestion,
-            "EnterPlanMode" => Self::EnterPlanMode,
-            "ExitPlanMode" => Self::ExitPlanMode,
-            "Bash" => Self::Bash,
-            "Read" => Self::Read,
-            "Write" => Self::Write,
-            "Edit" => Self::Edit,
-            "Grep" => Self::Grep,
-            "Glob" => Self::Glob,
-            "Task" => Self::Task,
-            "WebSearch" => Self::WebSearch,
-            "WebFetch" => Self::WebFetch,
-            "TodoWrite" => Self::TodoWrite,
-            "NotebookEdit" => Self::NotebookEdit,
-            "NotebookRead" => Self::NotebookRead,
-            _ => {
-                // Trim allocates a new owned String only if leading/trailing
-                // whitespace is present.
-                let trimmed = s.trim();
-                if trimmed.len() == s.len() {
-                    Self::Other(s)
-                } else {
-                    Self::Other(trimmed.to_string())
-                }
-            }
+        let trimmed = s.trim();
+        if let Some(known) = Self::try_from_known(trimmed) {
+            return known;
+        }
+        // Reuse the owned String when no whitespace was trimmed.
+        if trimmed.len() == s.len() {
+            Self::Other(s)
+        } else {
+            Self::Other(trimmed.to_string())
         }
     }
 }

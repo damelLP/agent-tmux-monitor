@@ -814,10 +814,7 @@ impl SessionDomain {
 
     /// Stores the first user prompt if not already set.
     pub fn set_first_prompt_from_event(&mut self, event: &LifecycleEvent) {
-        if let LifecycleEvent::PromptSubmit {
-            prompt: Some(text),
-        } = event
-        {
+        if let LifecycleEvent::PromptSubmit { prompt: Some(text) } = event {
             if !text.is_empty() {
                 self.set_first_prompt(text);
             }

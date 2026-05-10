@@ -199,9 +199,6 @@ mod tests {
     fn parse_unknown_event_falls_back_to_other() {
         let json = r#"{"event": "future_pi_event", "payload": {}}"#;
         let raw: RawPiEvent = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            raw.event,
-            PiEventType::Other("future_pi_event".to_string())
-        );
+        assert_eq!(raw.event, PiEventType::Other("future_pi_event".to_string()));
     }
 }

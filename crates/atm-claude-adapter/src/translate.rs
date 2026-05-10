@@ -77,7 +77,10 @@ impl RawHookEvent {
                 kind: Some(NotificationKind::Setup),
             },
             ClaudeEventType::Notification => {
-                let kind = self.notification_type.as_deref().map(NotificationKind::from);
+                let kind = self
+                    .notification_type
+                    .as_deref()
+                    .map(NotificationKind::from);
                 match kind {
                     Some(NotificationKind::PermissionPrompt)
                     | Some(NotificationKind::ElicitationDialog) => LifecycleEvent::NeedsInput {
