@@ -81,6 +81,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      tag_exists: ${{ steps.meta.outputs.tag_exists }}
       should_release: ${{ steps.meta.outputs.should_release }}
 
     steps:
@@ -94,6 +95,8 @@ jobs:
 
       - name: Determine release version
         id: meta
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
         run: |-
           set -euo pipefail
           version="$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "atm") | .version')"
@@ -103,17 +106,36 @@ jobs:
           fi
 
           tag="v$version"
+          tag_exists=false
+          release_exists=false
           should_release=false
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            tag_exists=true
+          fi
+
+          release_url="${GITHUB_API_URL:-https://api.github.com}/repos/${GITHUB_REPOSITORY}/releases/tags/$tag"
+          if curl -fsSL \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "$release_url" >/dev/null 2>&1; then
+            release_exists=true
+          fi
 
           if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
             if [ "${GITHUB_REF_NAME}" != "$tag" ]; then
               echo "::error::Tag ${GITHUB_REF_NAME} does not match Cargo version $version ($tag)"
               exit 1
             fi
-            should_release=true
+            if [ "$release_exists" = "true" ]; then
+              echo "Release $tag already exists; skipping release creation."
+            else
+              should_release=true
+            fi
           elif [ "${GITHUB_EVENT_NAME}" = "push" ] && [ "${GITHUB_REF_NAME}" = "main" ]; then
-            if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
-              echo "$tag already exists; skipping release creation."
+            if [ "$release_exists" = "true" ]; then
+              echo "Release $tag already exists; skipping release creation."
             else
               should_release=true
             fi
@@ -121,9 +143,12 @@ jobs:
 
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tag_exists=$tag_exists" >> "$GITHUB_OUTPUT"
           echo "should_release=$should_release" >> "$GITHUB_OUTPUT"
           echo "Version: $version"
           echo "Tag: $tag"
+          echo "Tag exists: $tag_exists"
+          echo "Release exists: $release_exists"
           echo "Should release: $should_release"
 
   build:
@@ -193,7 +218,7 @@ jobs:
           fetch-depth: 0
 
       - name: Create version tag
-        if: github.ref_type != 'tag'
+        if: github.ref_type != 'tag' && needs.prepare.outputs.tag_exists != 'true'
         run: |-
           set -euo pipefail
           git config user.name "github-actions[bot]"
