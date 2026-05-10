@@ -29,21 +29,12 @@
 //!    the pane atm spawn created shows up. This validates the entire
 //!    spawn → tmux split → hook event → registry update loop.
 //!
-//! 5. **`atm workspace attach`**: builds an isolated tmux server with a
-//!    multi-window session that simulates "the user's existing
-//!    workspace," runs `atm workspace attach` against it (with
-//!    `ATM_NO_ATTACH=1` to skip the blocking `exec_attach` step), and
-//!    asserts every window now has a `@atm-sidebar=1` pane and the
-//!    expected hooks are installed. Also asserts an idempotency
-//!    property: a second invocation does NOT double up sidebars.
-//!
-//! NOTE on attach vs. create divergence: `cmd_workspace_attach` installs
-//! both `after-resize-window` AND `after-new-window` hooks, so newly
-//! opened windows get a sidebar automatically. `cmd_workspace` (create)
-//! installs only the resize hook — a workspace built with `create` and
-//! then `prefix-c`-extended doesn't get sidebars in those new windows.
-//! Likely an oversight; this fixture verifies the attach side and
-//! leaves a TODO comment in `cmd_workspace` for the symmetry fix.
+//! 5. **`atm workspace create` / `atm workspace attach`**: verifies both
+//!    workspace flows install the resize and new-window hooks. The create
+//!    scenario also opens a new tmux window and asserts the hook injects a
+//!    sidebar there; the attach scenario starts from a multi-window session
+//!    and asserts every window gets exactly one sidebar, including on a
+//!    second idempotency run.
 //!
 //! The test skips cleanly (printed message, returns Ok) when `tmux` is
 //! absent from PATH, when the binaries weren't built, or — for scenario
@@ -776,7 +767,99 @@ async fn scenario_atm_spawn(env: &E2eEnv) {
     );
 }
 
-/// Scenario 5 — `atm workspace attach` against a separate isolated
+/// Scenario 5a — `atm workspace create` should install the same long-lived
+/// hooks as attach. In particular, after-new-window must inject a sidebar into
+/// windows opened after creation.
+async fn scenario_workspace_create(env: &E2eEnv) {
+    let create_session_name = format!("jghcrt{}", std::process::id());
+    let create_socket_label = format!("atm-{create_session_name}");
+    let create_data_dir = tempfile::tempdir().expect("create workspace data tempdir");
+
+    let create_output = Command::new(&env.atm_path)
+        .args([
+            "workspace",
+            "create",
+            "--name",
+            &create_session_name,
+            "--isolate",
+        ])
+        .env("ATM_NO_ATTACH", "1")
+        .env("XDG_DATA_HOME", create_data_dir.path())
+        .env("XDG_STATE_HOME", &env.daemon.state_dir)
+        .env("ATM_SOCKET", &env.daemon.socket_path)
+        .output()
+        .expect("run atm workspace create");
+    assert!(
+        create_output.status.success(),
+        "atm workspace create failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&create_output.stdout),
+        String::from_utf8_lossy(&create_output.stderr)
+    );
+
+    let create_tmux = PrivateTmux {
+        socket_label: create_socket_label,
+    };
+
+    let installed_hooks = tmux_run_capture(
+        create_tmux.label(),
+        &["show-hooks", "-t", &create_session_name],
+    )
+    .expect("show-hooks after create");
+    assert!(
+        installed_hooks.contains("after-resize-window"),
+        "after-resize-window hook should be installed after create; got: {installed_hooks}"
+    );
+    assert!(
+        installed_hooks.contains("after-new-window"),
+        "after-new-window hook should be installed after create; got: {installed_hooks}"
+    );
+
+    let initial_panes = list_panes_with_sidebar_marker(create_tmux.label())
+        .expect("list panes with sidebar marker after create");
+    let initial_sidebar_count = initial_panes.iter().filter(|p| p.is_sidebar).count();
+    assert_eq!(
+        initial_sidebar_count, 1,
+        "created workspace should start with exactly one sidebar; panes: {initial_panes:?}"
+    );
+
+    let mut cmd = Command::new("tmux");
+    cmd.args([
+        "-L",
+        create_tmux.label(),
+        "new-window",
+        "-t",
+        &create_session_name,
+    ]);
+    run_tmux_or_panic(&mut cmd, "new-window after workspace create");
+
+    let deadline = Instant::now() + SESSION_APPEAR_TIMEOUT;
+    loop {
+        let panes = list_panes_with_sidebar_marker(create_tmux.label())
+            .expect("list panes after create new-window");
+        let mut windows_with_sidebar: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::new();
+        for entry in &panes {
+            if entry.is_sidebar {
+                *windows_with_sidebar
+                    .entry(entry.window_id.clone())
+                    .or_insert(0) += 1;
+            }
+        }
+
+        if windows_with_sidebar.len() == 2 && windows_with_sidebar.values().all(|count| *count == 1)
+        {
+            break;
+        }
+
+        assert!(
+            Instant::now() < deadline,
+            "new window should receive exactly one sidebar via after-new-window hook; panes: {panes:?}"
+        );
+        tokio::time::sleep(SESSION_POLL_INTERVAL).await;
+    }
+}
+
+/// Scenario 5b — `atm workspace attach` against a separate isolated
 /// server (attach's `--isolate` flag hardcodes the socket label as
 /// `atm-<sessname>`, so it can't share the primary scenario server).
 /// Asserts every window gets an `@atm-sidebar=1` pane, both hooks are
@@ -931,6 +1014,7 @@ async fn atm_atmd_tmux_end_to_end() {
         eprintln!("SKIP scenario 4: python3 not on PATH (scenario 5 still runs)");
     }
 
+    scenario_workspace_create(&env).await;
     scenario_workspace_attach(&env).await;
 }
 
