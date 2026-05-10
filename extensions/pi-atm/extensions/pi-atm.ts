@@ -89,6 +89,36 @@ function logDebug(msg: string): void {
 let activeSocket: net.Socket | null = null;
 let pendingSocket: net.Socket | null = null;
 let reconnectScheduled = false;
+/**
+ * `true` while the active socket's internal buffer has exceeded its
+ * `highWaterMark` — i.e. `socket.write()` returned `false` and we
+ * haven't yet seen the `'drain'` event.
+ *
+ * Without this, large `context` payloads against a slow atmd reader
+ * silently grow Node's heap (write() always succeeds in the API
+ * sense; the buffering happens inside Node). Honouring the
+ * write-result keeps backpressure scoped to the bounded outbox
+ * instead of spilling into the heap.
+ */
+let socketPaused = false;
+
+/**
+ * Drains as much of `outbox` as the socket can absorb without
+ * triggering backpressure. Stops on the first `write` that returns
+ * `false` — `'drain'` will resume the flush. Used by both `connect`
+ * (to flush events queued during the handshake race) and `'drain'`
+ * (to flush events queued while paused).
+ */
+function flushOutboxTo(sock: net.Socket): void {
+	while (outbox.length > 0 && activeSocket === sock) {
+		const line = outbox.shift();
+		if (line === undefined) break;
+		if (!sock.write(line)) {
+			socketPaused = true;
+			break;
+		}
+	}
+}
 
 /**
  * Bounded FIFO of outgoing event lines waiting for a usable socket.
@@ -139,18 +169,25 @@ function openSocket(): void {
 		logDebug("socket connected");
 		pendingSocket = null;
 		activeSocket = sock;
+		socketPaused = false;
 		// Send the protocol handshake once for this connection.
 		const connectMsg = {
 			protocol_version: { major: 1, minor: 0 },
 			type: "connect",
 			client_id: `pi-atm-${process.pid}`,
 		};
-		sock.write(`${JSON.stringify(connectMsg)}\n`);
-		// Drain anything that queued while we were connecting.
-		while (outbox.length > 0) {
-			const line = outbox.shift();
-			if (line !== undefined) sock.write(line);
+		if (!sock.write(`${JSON.stringify(connectMsg)}\n`)) {
+			socketPaused = true;
 		}
+		// Drain anything that queued while we were connecting.
+		flushOutboxTo(sock);
+	});
+
+	sock.on("drain", () => {
+		// Stale event from a closed socket: ignore.
+		if (activeSocket !== sock) return;
+		socketPaused = false;
+		flushOutboxTo(sock);
 	});
 
 	sock.on("error", (err) => {
@@ -160,7 +197,10 @@ function openSocket(): void {
 	sock.on("close", () => {
 		logDebug("socket closed");
 		if (pendingSocket === sock) pendingSocket = null;
-		if (activeSocket === sock) activeSocket = null;
+		if (activeSocket === sock) {
+			activeSocket = null;
+			socketPaused = false;
+		}
 		// Don't reconnect aggressively — let the next send() trigger
 		// it, with a small backoff to avoid flapping.
 		if (!reconnectScheduled) {
@@ -208,12 +248,29 @@ function send(envelope: unknown): void {
 	}
 
 	if (activeSocket) {
+		if (socketPaused) {
+			// Socket is up but back-pressured (a previous write exceeded
+			// `highWaterMark` and `'drain'` hasn't fired yet). Queue
+			// instead of writing — `flushOutboxTo` will drain on drain.
+			enqueue(line);
+			return;
+		}
 		try {
-			activeSocket.write(line);
+			// `socket.write` returns `false` when the internal buffer
+			// is past `highWaterMark`. Subsequent writes still
+			// "succeed" but spill into Node's heap; the convention is
+			// to stop writing until `'drain'` fires. With pi's large
+			// `context` payloads against a slow atmd reader, ignoring
+			// this would let one wedged daemon eat the pi process's
+			// heap.
+			if (!activeSocket.write(line)) {
+				socketPaused = true;
+			}
 			return;
 		} catch (e) {
 			logDebug(`write threw: ${(e as Error).message}`);
 			activeSocket = null;
+			socketPaused = false;
 		}
 	}
 

@@ -335,7 +335,7 @@ fn check_claude_process(pid: u32) -> Option<DiscoveredProcess> {
 
 /// Checks if a PID is a `pi` (https://pi.dev/) process.
 ///
-/// `pi` is installed as a node-shebanged script — `comm` reports
+/// `pi` is installed as a node-shebang script — `comm` reports
 /// `node` rather than `pi` across most setups, so cmdline is the
 /// authoritative match. Recipe (`pgrep -fn 'pi-coding-agent|/bin/pi$'`)
 /// is encoded as `is_pi_path`.
@@ -354,14 +354,17 @@ fn check_pi_process(pid: u32) -> Option<DiscoveredProcess> {
 ///
 /// Matches:
 /// - `/path/to/bin/pi` (canonical install)
-/// - `pi` (bare command name)
+/// - `*/pi` (any path ending with `/pi` — covers non-`bin` install locations)
 /// - `.../pi-coding-agent/...` (npm package path; pi is published as
 ///   `@mariozechner/pi-coding-agent`)
+///
+/// Bare `"pi"` is intentionally not matched: `check_via_cmdline`
+/// scans every non-flag argv entry, so a bare-string match would
+/// false-positive on any process that happens to take `pi` as an
+/// argument. Real pi invocations land in argv as either an absolute
+/// path or under the published npm package prefix.
 fn is_pi_path(path: &str) -> bool {
-    path.ends_with("/bin/pi")
-        || path.ends_with("/pi")
-        || path == "pi"
-        || path.contains("pi-coding-agent")
+    path.ends_with("/bin/pi") || path.ends_with("/pi") || path.contains("pi-coding-agent")
 }
 
 /// Generic helper: tests `/proc/{pid}/exe` against `path_matches` and

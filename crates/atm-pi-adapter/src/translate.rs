@@ -152,8 +152,13 @@ impl RawPiEvent {
             // Suppress: tool_call is the canonical "tool starting" signal.
             PiEventType::ToolExecutionStart => return None,
 
+            // Tool-shaped events without a `tool_name` are malformed
+            // (Tool::from("") would inject phantom Tool::Other("")
+            // records into the registry). Drop them — same guard the
+            // Claude adapter applies to PreToolUse / PostToolUse.
             PiEventType::ToolCall => {
-                let tool = Tool::from(p.tool_name.as_deref().unwrap_or(""));
+                let tool_name = p.tool_name.as_deref().filter(|s| !s.is_empty())?;
+                let tool = Tool::from(tool_name);
                 if p.needs_user_input.unwrap_or(false) {
                     LifecycleEvent::NeedsInput {
                         reason: NeedsInputReason::PermissionGate { tool },
@@ -167,11 +172,14 @@ impl RawPiEvent {
                 }
             }
 
-            PiEventType::ToolExecutionEnd => LifecycleEvent::ToolCallEnd {
-                name: Tool::from(p.tool_name.as_deref().unwrap_or("")),
-                tool_use_id: p.tool_call_id.clone(),
-                is_error: p.is_error.unwrap_or(false),
-            },
+            PiEventType::ToolExecutionEnd => {
+                let tool_name = p.tool_name.as_deref().filter(|s| !s.is_empty())?;
+                LifecycleEvent::ToolCallEnd {
+                    name: Tool::from(tool_name),
+                    tool_use_id: p.tool_call_id.clone(),
+                    is_error: p.is_error.unwrap_or(false),
+                }
+            }
 
             // Suppress: paired with tool_execution_end.
             PiEventType::ToolResult => return None,
@@ -519,6 +527,35 @@ mod tests {
                 }
             })
         );
+    }
+
+    #[test]
+    fn tool_shaped_event_without_tool_name_returns_none() {
+        // Symmetric with the Claude adapter's guard: pi `tool_call`
+        // and `tool_execution_end` payloads without a `tool_name` are
+        // malformed. Translating them used to produce
+        // `Tool::Other("")` and inject phantom records into the
+        // registry. Verify the guard drops them across both `None`
+        // and empty-string forms.
+        for ev in [PiEventType::ToolCall, PiEventType::ToolExecutionEnd] {
+            assert_eq!(
+                raw(ev.clone(), PiPayload::default()).to_lifecycle_event(),
+                None,
+                "{ev:?} with tool_name=None should drop"
+            );
+            assert_eq!(
+                raw(
+                    ev.clone(),
+                    PiPayload {
+                        tool_name: Some(String::new()),
+                        ..Default::default()
+                    }
+                )
+                .to_lifecycle_event(),
+                None,
+                "{ev:?} with empty tool_name should drop"
+            );
+        }
     }
 
     #[test]

@@ -337,7 +337,16 @@ fn install_pi_extension() -> Result<(bool, bool)> {
         .with_context(|| format!("Failed to write {}", pkg_path.display()))?;
 
     // Update pi's settings.json packages array.
+    //
+    // `Value` indexing panics when the inner value isn't an object —
+    // a corrupted or hand-edited settings.json that's e.g. `null` or
+    // `["array"]` would crash atm setup. Replace any non-object root
+    // with `{}` so the indexing below is always valid; we still error
+    // out below if `packages` exists but is the wrong shape.
     let mut settings = read_pi_settings()?;
+    if !settings.is_object() {
+        settings = json!({});
+    }
     if settings.get("packages").is_none() {
         settings["packages"] = json!([]);
     }
