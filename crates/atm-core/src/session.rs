@@ -1544,6 +1544,69 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_needs_input_notification_uses_label_when_present() {
+        // The `label` plumbing exists so the TUI shows *what* permission
+        // is being asked (the dialog title forwarded by pi-atm's
+        // `ctx.ui.select` wrapper) instead of a generic kind string.
+        let mut session = create_test_session("test-label");
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::PermissionPrompt,
+                label: Some("Allow `rm -rf /tmp/cache`?".into()),
+            },
+        });
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("Allow `rm -rf /tmp/cache`?")
+        );
+    }
+
+    #[test]
+    fn lifecycle_needs_input_notification_falls_back_to_kind_when_label_absent() {
+        // Claude `Notification(permission_prompt)` events don't carry a
+        // per-prompt label — only a kind tag. Verify the fallback
+        // rendering still resolves to the kind-derived string.
+        let mut session = create_test_session("test-no-label");
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::PermissionPrompt,
+                label: None,
+            },
+        });
+        assert_eq!(session.status, SessionStatus::AttentionNeeded);
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("Permission")
+        );
+
+        session.apply_lifecycle_event(&LifecycleEvent::NeedsInput {
+            reason: NeedsInputReason::Notification {
+                kind: NotificationKind::ElicitationDialog,
+                label: None,
+            },
+        });
+        assert_eq!(
+            session
+                .current_activity
+                .as_ref()
+                .map(|a| a.display())
+                .as_deref(),
+            Some("MCP Input")
+        );
+    }
+
+    #[test]
     fn lifecycle_tool_call_start_for_standard_tool() {
         let mut session = create_test_session("test-standard");
 

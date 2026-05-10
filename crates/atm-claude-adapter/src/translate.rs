@@ -199,6 +199,33 @@ mod tests {
     }
 
     #[test]
+    fn tool_shaped_event_without_tool_name_returns_none() {
+        // PreToolUse / PostToolUse / PostToolUseFailure without a
+        // tool_name are malformed — translating them used to fabricate
+        // Tool::Other("") and inject phantom records into the registry.
+        // The guard now drops them; verify across both `None` and
+        // empty-string forms.
+        for name in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+            assert_eq!(
+                raw(name).to_lifecycle_event(),
+                None,
+                "{name} with tool_name=None should drop"
+            );
+            let mut empty = raw(name);
+            empty.tool_name = Some(String::new());
+            assert_eq!(
+                empty.to_lifecycle_event(),
+                None,
+                "{name} with empty tool_name should drop"
+            );
+        }
+
+        // Negative: a non-tool event without tool_name still translates
+        // (the guard scopes to the three tool-shaped events only).
+        assert!(raw("Stop").to_lifecycle_event().is_some());
+    }
+
+    #[test]
     fn post_tool_use_distinguishes_failure() {
         let mut ok = raw("PostToolUse");
         ok.tool_name = Some("Bash".into());
