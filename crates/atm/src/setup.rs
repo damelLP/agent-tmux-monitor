@@ -500,8 +500,8 @@ fn setup_claude_code() -> Result<()> {
     Ok(())
 }
 
-/// Installs the `pi-atm` extension into `~/.pi/packages/pi-atm/` and
-/// registers it in pi's settings.json `packages` array.
+/// Installs the `pi-atm` extension into `~/.pi/agent/packages/pi-atm/`
+/// and registers it in pi's settings.json `packages` array.
 fn setup_pi() -> Result<()> {
     println!("\nConfiguring pi...");
     let (files_written, settings_changed) = install_pi_extension()?;

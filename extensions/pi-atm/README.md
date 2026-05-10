@@ -44,8 +44,12 @@ Tracks beads `agent-tmux-manager-6dx`.
 
 ## Install
 
-Easiest: let `atm setup` do it for you (auto-detects pi installation,
-runs `pi install`):
+Easiest: let `atm setup` do it for you. It auto-detects pi by
+locating `~/.pi/agent/`, then writes the embedded extension to
+`~/.pi/agent/packages/pi-atm/` and adds `"packages/pi-atm"` to
+`~/.pi/agent/settings.json`'s `packages` array — no `pi install`
+invocation needed since pi resolves local-package entries
+relative to its `agentDir` directly:
 
 ```sh
 atm setup

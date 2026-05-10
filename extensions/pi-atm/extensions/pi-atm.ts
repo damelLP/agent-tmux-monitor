@@ -35,10 +35,15 @@ const DEBUG = process.env.ATM_DEBUG === "1";
  * pi events the atm daemon's pi adapter knows how to translate.
  *
  * Subscribing to *only* these (rather than every declared pi event)
- * keeps wire traffic low — the high-frequency events
- * (`message_update`, `before_provider_request`, `turn_start`/`turn_end`,
- * `context`) are deliberately not forwarded; the adapter's
- * `to_lifecycle_event` returns `None` for them anyway.
+ * keeps wire traffic low — the truly high-frequency events
+ * (`message_update`, `before_provider_request`, `turn_start`/`turn_end`)
+ * are deliberately not forwarded; the adapter's `to_lifecycle_event`
+ * returns `None` for them anyway.
+ *
+ * `context` is the exception: it fires per provider request and
+ * carries cumulative cost/tokens, which drive the TUI's cost +
+ * context-percentage display, so we *do* forward it despite the
+ * higher payload cost (see the inline note on its entry below).
  */
 const FORWARDED_EVENTS = [
 	"session_start",
