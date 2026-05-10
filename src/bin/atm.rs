@@ -1625,13 +1625,9 @@ fn cmd_workspace(name: Option<String>, isolate: bool, editor: bool) -> Result<()
         &["send-keys", "-t", &agent_pane, "claude", "Enter"],
     )?;
 
-    // 9. Install resize hooks + prefix-R keybinding
+    // 9. Install resize/new-window hooks + prefix-R keybinding
     install_resize_hooks(&socket_name, &session_name)?;
-    // NOTE: divergence with `cmd_workspace_attach`, which also calls
-    // `install_new_window_hook` here. As written, a workspace created via
-    // `create` does not get sidebars injected into windows opened later
-    // (e.g., via prefix-c). Likely an oversight — both flows produce the
-    // same long-lived session and should hook the same events.
+    install_new_window_hook(&socket_name, &session_name)?;
 
     // 10. Focus the agent pane and attach
     tmux_run(&socket_name, &["select-pane", "-t", &agent_pane])?;
