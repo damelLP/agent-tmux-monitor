@@ -7,9 +7,10 @@
 //!   `~/.local/bin/`, then registers it in `~/.claude/settings.json`'s
 //!   `hooks` and `statusLine` blocks.
 //! - **pi** (<https://pi.dev/>): writes the `pi-atm` TypeScript
-//!   extension to `~/.pi/packages/pi-atm/`, then adds
+//!   extension to `~/.pi/agent/packages/pi-atm/`, then adds
 //!   `"packages/pi-atm"` to `~/.pi/agent/settings.json`'s `packages`
-//!   array. Mirrors how pi-amplike documents local-dev installs.
+//!   array (the entry is resolved relative to pi's `agentDir`).
+//!   Mirrors how pi-amplike documents local-dev installs.
 
 use std::fs;
 #[cfg(unix)]
@@ -313,8 +314,8 @@ fn write_pi_settings(settings: &Value) -> Result<()> {
 }
 
 /// Writes the embedded pi-atm extension files to
-/// `~/.pi/packages/pi-atm/` (overwriting if present), then ensures
-/// `"packages/pi-atm"` is in pi's settings `packages` array.
+/// `~/.pi/agent/packages/pi-atm/` (overwriting if present), then
+/// ensures `"packages/pi-atm"` is in pi's settings `packages` array.
 ///
 /// Returns `(files_written, settings_changed)` for caller's success
 /// message.
@@ -344,7 +345,8 @@ fn install_pi_extension() -> Result<(bool, bool)> {
         .as_array_mut()
         .context("packages is not an array in pi settings.json")?;
 
-    // Pi's local-package format: "packages/<name>" (relative to ~/.pi/).
+    // Pi's local-package format: "packages/<name>" (relative to
+    // pi's `agentDir`, which is `~/.pi/agent/`).
     let entry = Value::String("packages/pi-atm".to_string());
     let already_present = packages.iter().any(|v| v == &entry);
     if !already_present {
@@ -356,8 +358,8 @@ fn install_pi_extension() -> Result<(bool, bool)> {
     }
 }
 
-/// Removes the pi-atm extension from `~/.pi/packages/` and from pi's
-/// settings.json.
+/// Removes the pi-atm extension from `~/.pi/agent/packages/pi-atm/`
+/// and from pi's settings.json.
 fn uninstall_pi_extension() -> Result<bool> {
     let mut changed = false;
     if let Some(pkg_dir) = pi_atm_package_dir() {

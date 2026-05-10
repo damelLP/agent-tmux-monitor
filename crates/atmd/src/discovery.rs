@@ -337,9 +337,8 @@ fn check_claude_process(pid: u32) -> Option<DiscoveredProcess> {
 ///
 /// `pi` is installed as a node-shebanged script — `comm` reports
 /// `node` rather than `pi` across most setups, so cmdline is the
-/// authoritative match. The spike's recommendation
-/// (`pgrep -fn 'pi-coding-agent|/bin/pi$'`, see
-/// `docs/PI_INTEGRATION.md`) is encoded as `is_pi_path`.
+/// authoritative match. Recipe (`pgrep -fn 'pi-coding-agent|/bin/pi$'`)
+/// is encoded as `is_pi_path`.
 fn check_pi_process(pid: u32) -> Option<DiscoveredProcess> {
     if let Some(process) = check_via_exe(pid, is_pi_path, Harness::Pi) {
         return Some(process);

@@ -2,7 +2,9 @@
  * ATM × pi event-trace spike.
  *
  * Throwaway extension: subscribes to every pi event we know about and logs
- * each fire to /tmp/atm-pi-spike-<sessionId>-<startedAt>.jsonl as JSONL.
+ * each fire to /tmp/atm-pi-spike-<pid>-<startedAt>.jsonl as JSONL
+ * (pid not sessionId — pi's session id only becomes available after
+ * the first event, so the filename keys on a stable identifier).
  *
  * Run:
  *   pi --extension /abs/path/to/event-trace.ts
@@ -15,8 +17,7 @@
  *     Stopped) are inferable from event signals alone.
  *   - Discover pi session storage layout under ~/.pi/.
  *
- * Output: see README.md for log location + how to feed findings into
- *   docs/PI_INTEGRATION.md.
+ * Output: see README.md for log location.
  */
 
 import * as fs from "node:fs";
@@ -24,9 +25,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
-// All event names declared in pi's ExtensionEvent type union (dist/core/extensions/types.d.ts).
-// Keeping this hard-coded so the spike has a single source-of-truth list and is trivially
-// auditable — if pi adds events later, the audit ("did we miss any?") becomes obvious.
+// Event names pi is known to emit: the ExtensionEvent type union from
+// dist/core/extensions/types.d.ts plus two undeclared-but-real events
+// (`tool_call`, `tool_result`) that this spike was specifically built
+// to confirm. Keeping the list hard-coded so the spike has a single
+// source-of-truth and is trivially auditable — if pi adds events
+// later, the audit ("did we miss any?") becomes obvious.
 const KNOWN_EVENTS = [
 	"resources_discover",
 	"session_start",

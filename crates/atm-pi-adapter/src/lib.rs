@@ -16,11 +16,12 @@
 //!
 //! ## Event vocabulary
 //!
-//! The 28 pi events (26 declared in pi's TypeScript types + 2
-//! undeclared but observed in real traces) are documented in
-//! `docs/PI_INTEGRATION.md`. The spike (bead
-//! `agent-tmux-manager-9dn`) captured real JSONL traces under
-//! `/tmp/atm-pi-spike-*.jsonl` that drive this crate's tests.
+//! 28 pi events: 26 declared in pi's
+//! `dist/core/extensions/types.d.ts` plus 2 undeclared but real
+//! (`tool_call`, `tool_result`). See `event::PiEventType` for the
+//! enumeration and `translate.rs` for per-variant lifecycle mapping.
+//! Originally captured by the `agent-tmux-manager-9dn` spike under
+//! `extensions/pi-spike/`.
 //!
 //! ## Three-axis vendor model
 //!

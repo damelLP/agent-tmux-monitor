@@ -85,10 +85,11 @@ pub struct PiPayload {
     pub messages: Option<serde_json::Value>,
 
     // === Permission gate (synthesized by extension's tool_call handler) ===
-    /// True when ATM's pi adapter is signaling that pi has reached a
-    /// `ctx.ui.select(...)` permission prompt and is awaiting user
-    /// input. Pi itself does not emit a `block: true` payload — this
-    /// flag is set by the adapter to drive `NeedsInput` translation.
+    /// True when the upstream pi extension is signalling that pi has
+    /// reached a `ctx.ui.select(...)` permission prompt and is awaiting
+    /// user input. Pi itself does not emit a `block: true` payload, so
+    /// this flag is set by an adapter-side TS extension and consumed
+    /// here in `translate.rs` to drive `NeedsInput`.
     #[serde(default)]
     pub needs_user_input: Option<bool>,
 

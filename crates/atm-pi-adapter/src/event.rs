@@ -2,8 +2,7 @@
 //!
 //! Sourced from pi's `dist/core/extensions/types.d.ts` (declared) plus
 //! two undeclared events (`tool_call`, `tool_result`) confirmed real by
-//! the spike trace. See `docs/PI_INTEGRATION.md` for the full mapping
-//! table including which events were observed in real sessions.
+//! the `agent-tmux-manager-9dn` spike trace under `extensions/pi-spike/`.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;

@@ -260,7 +260,7 @@ impl std::fmt::Display for RemovalReason {
             Self::Explicit => write!(f, "explicitly removed"),
             Self::RegistryFull => write!(f, "registry capacity reached"),
             Self::SessionEnded => write!(f, "session ended"),
-            Self::ProcessDied => write!(f, "process died without SessionEnd"),
+            Self::ProcessDied => write!(f, "process died without a session-end signal"),
             Self::Upgraded => write!(f, "upgraded to real session"),
         }
     }
@@ -306,7 +306,7 @@ mod tests {
         assert_eq!(RemovalReason::SessionEnded.to_string(), "session ended");
         assert_eq!(
             RemovalReason::ProcessDied.to_string(),
-            "process died without SessionEnd"
+            "process died without a session-end signal"
         );
     }
 

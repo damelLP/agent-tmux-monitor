@@ -110,11 +110,25 @@ impl RawPiEvent {
     ///
     /// ## NeedsInput synthesis
     ///
-    /// When the TS extension reaches a `ctx.ui.select(...)` permission
-    /// prompt, it emits a `tool_call` payload with
-    /// `needs_user_input: true`. This translator turns that into
-    /// `LifecycleEvent::NeedsInput{ reason: PermissionGate{ tool } }`.
-    /// Without that flag, `tool_call` translates to
+    /// Pi has no first-class permission-prompt event; permission
+    /// gating happens *inside* an extension's `tool_call` handler via
+    /// `ctx.ui.select(...)`. Two adapter paths feed `NeedsInput`:
+    ///
+    /// 1. **Synthetic events (used by `pi-atm`).** The pi-atm
+    ///    extension wraps `ctx.ui.select` and emits
+    ///    `atm_needs_input_open{title}` / `atm_needs_input_resolved`
+    ///    around the dialog — translated to
+    ///    `NeedsInputReason::Notification{ kind: PermissionPrompt,
+    ///    label }` on open and `LifecycleEvent::WorkingStart` on
+    ///    resolve. This is the path actually exercised by today's
+    ///    extension.
+    /// 2. **Inline flag (still supported).** When a `tool_call`
+    ///    payload arrives with `needs_user_input: true`, it
+    ///    translates to `NeedsInputReason::PermissionGate{ tool }`.
+    ///    Kept for adapters that prefer to ride the existing
+    ///    `tool_call` envelope rather than emit synthetic events.
+    ///
+    /// Without either signal, `tool_call` is just
     /// `LifecycleEvent::ToolCallStart`.
     pub fn to_lifecycle_event(&self) -> Option<LifecycleEvent> {
         let p = &self.payload;
