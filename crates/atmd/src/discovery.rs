@@ -20,7 +20,7 @@
 
 use std::path::PathBuf;
 
-use atm_core::{Harness, SessionId};
+use atm_core::{builtin_harnesses, Harness, HarnessDefinition, SessionId};
 use thiserror::Error;
 use tracing::{debug, info, trace, warn};
 
@@ -254,9 +254,9 @@ impl DiscoveryService {
 
 /// Scans /proc for coding-agent processes.
 ///
-/// Single pass: for each PID, dispatches through per-harness detectors
-/// (Claude → pi → …). The first detector that matches wins. Adding a
-/// new harness means adding one detector below; no caller changes.
+/// Single pass: for each PID, dispatches through the built-in harness
+/// registry. The first matching definition wins. Adding a new built-in
+/// harness means adding one data record in atm-core; no caller changes.
 ///
 /// This function performs blocking I/O and should be called via
 /// `spawn_blocking`.
@@ -287,111 +287,67 @@ fn scan_agent_processes() -> Result<Vec<DiscoveredProcess>, DiscoveryError> {
 
 /// Tries each registered harness detector against `pid`. Returns the
 /// first match or `None`.
-///
-/// Order matters insofar as we want common, fast checks first. Both
-/// `check_claude_process` and `check_pi_process` walk `/proc/{pid}/exe`
-/// then fall back to cmdline; cost is similar. Claude is checked first
-/// only because it's the historic default.
 fn detect_agent_process(pid: u32) -> Option<DiscoveredProcess> {
-    if let Some(p) = check_claude_process(pid) {
-        return Some(p);
-    }
-    if let Some(p) = check_pi_process(pid) {
-        return Some(p);
-    }
-    None
+    builtin_harnesses()
+        .filter(|definition| definition.discovery_enabled)
+        .find_map(|definition| check_harness_process(pid, definition))
 }
 
-/// Checks if a path string represents a Claude executable.
-///
-/// Matches:
-/// - `/path/to/claude` (ends with /claude)
-/// - `claude` (bare command name)
-/// - `~/.local/share/claude/versions/X.Y.Z/...` (versioned installs)
-fn is_claude_path(path: &str) -> bool {
-    path.ends_with("/claude") || path == "claude" || path.contains("claude/versions/")
-}
-
-/// Checks if a PID is a Claude Code process.
+/// Checks if a PID matches a built-in harness definition.
 ///
 /// First attempts to identify via `/proc/{pid}/exe`. Falls back to
-/// `/proc/{pid}/cmdline` for wrapper scripts.
-fn check_claude_process(pid: u32) -> Option<DiscoveredProcess> {
-    if let Some(process) = check_via_exe(pid, is_claude_path, Harness::ClaudeCode) {
+/// `/proc/{pid}/cmdline` for shebang/node-based CLIs and path-like command
+/// arguments. Bare command-name matches are deliberately limited to argv0 to
+/// avoid false positives from arbitrary positional data.
+fn check_harness_process(
+    pid: u32,
+    definition: &'static HarnessDefinition,
+) -> Option<DiscoveredProcess> {
+    if let Some(process) = check_via_exe(pid, definition) {
         return Some(process);
     }
 
-    let result = check_via_cmdline(pid, is_claude_path, Harness::ClaudeCode);
+    let result = check_via_cmdline(pid, definition);
 
     if result.is_some() {
         trace!(
             pid,
-            "Detected Claude via cmdline fallback (exe check failed)"
+            harness = definition.id,
+            "Detected harness via cmdline fallback (exe check failed)"
         );
     }
 
     result
 }
 
-/// Checks if a PID is a `pi` (https://pi.dev/) process.
-///
-/// `pi` is installed as a node-shebang script — `comm` reports
-/// `node` rather than `pi` across most setups, so cmdline is the
-/// authoritative match. Recipe (`pgrep -fn 'pi-coding-agent|/bin/pi$'`)
-/// is encoded as `is_pi_path`.
-fn check_pi_process(pid: u32) -> Option<DiscoveredProcess> {
-    if let Some(process) = check_via_exe(pid, is_pi_path, Harness::Pi) {
-        return Some(process);
-    }
-    let result = check_via_cmdline(pid, is_pi_path, Harness::Pi);
-    if result.is_some() {
-        trace!(pid, "Detected pi via cmdline fallback (exe check failed)");
-    }
-    result
-}
-
-/// Checks if a path string represents a pi executable.
-///
-/// Matches:
-/// - `/path/to/bin/pi` (canonical install)
-/// - `*/pi` (any path ending with `/pi` — covers non-`bin` install locations)
-/// - `.../pi-coding-agent/...` (npm package path; pi is published as
-///   `@mariozechner/pi-coding-agent`)
-///
-/// Bare `"pi"` is intentionally not matched: `check_via_cmdline`
-/// scans every non-flag argv entry, so a bare-string match would
-/// false-positive on any process that happens to take `pi` as an
-/// argument. Real pi invocations land in argv as either an absolute
-/// path or under the published npm package prefix.
-fn is_pi_path(path: &str) -> bool {
-    path.ends_with("/bin/pi") || path.ends_with("/pi") || path.contains("pi-coding-agent")
-}
-
-/// Generic helper: tests `/proc/{pid}/exe` against `path_matches` and
-/// returns a `DiscoveredProcess` tagged with `harness` on match.
-fn check_via_exe(
-    pid: u32,
-    path_matches: fn(&str) -> bool,
-    harness: Harness,
-) -> Option<DiscoveredProcess> {
+/// Generic helper: tests `/proc/{pid}/exe` against a harness definition and
+/// returns a `DiscoveredProcess` tagged with that harness on match.
+fn check_via_exe(pid: u32, definition: &'static HarnessDefinition) -> Option<DiscoveredProcess> {
     let exe_path = format!("/proc/{pid}/exe");
     let exe = std::fs::read_link(&exe_path).ok()?;
     let exe_str = exe.to_string_lossy();
 
-    if !path_matches(&exe_str) {
+    if !definition
+        .process_matchers
+        .iter()
+        .any(|matcher| matcher.matches(&exe_str))
+    {
         return None;
     }
 
-    get_process_info(pid, harness)
+    get_process_info(pid, definition.harness)
 }
 
-/// Generic helper: scans `/proc/{pid}/cmdline` arguments and returns
-/// a `DiscoveredProcess` tagged with `harness` if any non-flag arg
-/// satisfies `path_matches`.
+/// Generic helper: scans `/proc/{pid}/cmdline` arguments and returns a
+/// `DiscoveredProcess` tagged with the harness if a safe command-shaped arg
+/// satisfies the definition's process matchers.
+///
+/// Bare command-name matches only count at argv0. Later args must be path-like
+/// (contain `/`) to avoid treating arbitrary positional data as an agent
+/// executable.
 fn check_via_cmdline(
     pid: u32,
-    path_matches: fn(&str) -> bool,
-    harness: Harness,
+    definition: &'static HarnessDefinition,
 ) -> Option<DiscoveredProcess> {
     let cmdline_path = format!("/proc/{pid}/cmdline");
     let cmdline_bytes = std::fs::read(&cmdline_path).ok()?;
@@ -400,19 +356,37 @@ fn check_via_cmdline(
         .split(|&b| b == 0)
         .filter_map(|bytes| std::str::from_utf8(bytes).ok())
         .filter(|s| !s.is_empty())
-        .any(|arg| {
+        .enumerate()
+        .any(|(index, arg)| {
             // Skip flag arguments (e.g. --config)
             if arg.starts_with('-') {
                 return false;
             }
-            path_matches(arg)
+            cmdline_arg_matches_definition(index, arg, definition)
         });
 
     if !matched {
         return None;
     }
 
-    get_process_info(pid, harness)
+    get_process_info(pid, definition.harness)
+}
+
+/// Returns true if one cmdline argument can identify a harness.
+fn cmdline_arg_matches_definition(
+    index: usize,
+    arg: &str,
+    definition: &'static HarnessDefinition,
+) -> bool {
+    let is_argv0 = index == 0;
+    let is_path_like = arg.contains('/');
+    if !is_path_like && (!is_argv0 || !definition.allow_bare_cmdline_match) {
+        return false;
+    }
+    definition
+        .process_matchers
+        .iter()
+        .any(|matcher| matcher.matches(arg))
 }
 
 /// Gets process info (cwd, tmux pane) for a PID.
@@ -654,41 +628,94 @@ mod tests {
     }
 
     // ========================================================================
-    // Tests for is_claude_path helper
+    // Tests for registry-backed process matching
     // ========================================================================
 
-    #[test]
-    fn test_is_claude_path_absolute_path() {
-        assert!(is_claude_path("/usr/local/bin/claude"));
-        assert!(is_claude_path("/home/user/.local/bin/claude"));
+    fn matches_harness_path(harness_id: &str, path: &str) -> bool {
+        atm_core::find_harness_definition(harness_id)
+            .map(|definition| {
+                definition
+                    .process_matchers
+                    .iter()
+                    .any(|matcher| matcher.matches(path))
+            })
+            .unwrap_or(false)
     }
 
     #[test]
-    fn test_is_claude_path_bare_command() {
-        assert!(is_claude_path("claude"));
+    fn test_claude_registry_matcher_absolute_path() {
+        assert!(matches_harness_path("claude", "/usr/local/bin/claude"));
+        assert!(matches_harness_path(
+            "claude",
+            "/home/user/.local/bin/claude"
+        ));
     }
 
     #[test]
-    fn test_is_claude_path_versioned_install() {
-        assert!(is_claude_path(
+    fn test_claude_registry_matcher_bare_command() {
+        assert!(matches_harness_path("claude", "claude"));
+    }
+
+    #[test]
+    fn test_claude_registry_matcher_versioned_install() {
+        assert!(matches_harness_path(
+            "claude",
             "/home/user/.local/share/claude/versions/1.2.3/claude"
         ));
-        assert!(is_claude_path("~/.local/share/claude/versions/0.5.0/node"));
+        assert!(matches_harness_path(
+            "claude",
+            "~/.local/share/claude/versions/0.5.0/node"
+        ));
     }
 
     #[test]
-    fn test_is_claude_path_rejects_non_claude() {
-        assert!(!is_claude_path("/usr/bin/bash"));
-        assert!(!is_claude_path("vim"));
-        assert!(!is_claude_path("/home/user/claudette")); // not ending with /claude
-        assert!(!is_claude_path("claude-dev")); // not exact match
+    fn test_claude_registry_matcher_rejects_non_claude() {
+        assert!(!matches_harness_path("claude", "/usr/bin/bash"));
+        assert!(!matches_harness_path("claude", "vim"));
+        assert!(!matches_harness_path("claude", "/home/user/claudette"));
+        assert!(!matches_harness_path("claude", "claude-dev"));
     }
 
     #[test]
-    fn test_is_claude_path_edge_cases() {
-        // Path that contains "claude" but not at the end or in versions
-        assert!(!is_claude_path("/home/claudeuser/bin/tool"));
-        // Empty string
-        assert!(!is_claude_path(""));
+    fn test_pi_registry_matcher_rejects_bare_cmdline_match() {
+        let pi = atm_core::find_harness_definition("pi");
+        assert!(pi.is_some_and(|definition| !definition.allow_bare_cmdline_match));
+        assert!(matches_harness_path("pi", "/usr/bin/pi"));
+        assert!(!matches_harness_path("pi", "not-pi"));
+    }
+
+    #[test]
+    fn test_cmdline_matching_only_allows_bare_match_on_argv0() {
+        let claude = atm_core::find_harness_definition("claude")
+            .unwrap_or_else(atm_core::default_harness_definition);
+        assert!(cmdline_arg_matches_definition(0, "claude", claude));
+        assert!(!cmdline_arg_matches_definition(1, "claude", claude));
+        assert!(cmdline_arg_matches_definition(
+            1,
+            "/usr/local/bin/claude",
+            claude
+        ));
+    }
+
+    #[test]
+    fn test_cmdline_matching_rejects_bare_pi_positional_arg() {
+        let pi = atm_core::find_harness_definition("pi")
+            .unwrap_or_else(atm_core::default_harness_definition);
+        assert!(!cmdline_arg_matches_definition(0, "pi", pi));
+        assert!(!cmdline_arg_matches_definition(2, "pi", pi));
+        assert!(cmdline_arg_matches_definition(
+            1,
+            "/home/user/.npm/pi-coding-agent/bin/pi.js",
+            pi
+        ));
+    }
+
+    #[test]
+    fn test_only_adapter_backed_harnesses_are_discovery_enabled() {
+        let enabled: Vec<&str> = atm_core::builtin_harnesses()
+            .filter(|definition| definition.discovery_enabled)
+            .map(|definition| definition.id)
+            .collect();
+        assert_eq!(enabled, vec!["claude", "pi"]);
     }
 }

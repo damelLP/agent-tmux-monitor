@@ -1,13 +1,13 @@
 //! ATM — Agent Tmux Manager
 //!
-//! CLI + TUI for managing Claude Code agents in tmux.
+//! CLI + TUI for managing coding agents in tmux.
 //!
 //! # Usage
 //!
 //! ```text
 //! atm                        # Launch TUI dashboard
 //! atm --pick                 # Pick mode - exit after jumping to a session
-//! atm spawn                  # Spawn a new Claude agent
+//! atm spawn                  # Spawn a new coding agent
 //! atm kill <session-id>      # Kill an agent
 //! atm interrupt <session-id> # Send SIGINT to an agent
 //! atm send <session-id> <text> # Send text to agent pane
@@ -17,7 +17,7 @@
 //! atm uninstall              # Remove hooks
 //! ```
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -32,6 +32,7 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use ratatui::{backend::CrosstermBackend, Terminal};
+use serde::Deserialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
@@ -39,7 +40,10 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 use tracing_subscriber::EnvFilter;
 
-use atm_core::SessionView;
+use atm_core::{
+    builtin_harnesses, default_harness_definition, find_harness_definition, HarnessDefinition,
+    SessionView,
+};
 use atm_protocol::{ClientMessage, DaemonMessage};
 use atm_tmux::{RealTmuxClient, TmuxClient};
 use atm_tui::app::App;
@@ -56,10 +60,10 @@ use atm_tui::ui;
 // CLI Arguments
 // ============================================================================
 
-/// ATM — Agent Tmux Manager for Claude Code
+/// ATM — Agent Tmux Manager for coding-agent harnesses
 #[derive(Parser, Debug)]
 #[command(name = "atm")]
-#[command(about = "Manage Claude Code agents in tmux")]
+#[command(about = "Manage coding agents in tmux")]
 #[command(version)]
 struct Args {
     #[command(subcommand)]
@@ -80,12 +84,15 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Configure Claude Code hooks for atm
+    /// Configure supported harness integrations for atm
     Setup,
-    /// Remove atm hooks from Claude Code
+    /// Remove atm integrations from supported harnesses
     Uninstall,
-    /// Spawn a new Claude Code agent in a tmux pane
+    /// Spawn a coding agent in a tmux pane
     Spawn {
+        /// Harness to launch (e.g., claude, pi, codex, amp, qwen, gemini). Defaults to [harness].default in config, or claude.
+        #[arg(long = "harness", short = 'H')]
+        harness: Option<String>,
         /// Model to use (e.g., opus, sonnet, haiku)
         #[arg(long, short = 'm')]
         model: Option<String>,
@@ -786,44 +793,260 @@ fn shell_quote(s: &str) -> String {
 
 /// Build the shell command string sent to a freshly-split tmux pane.
 ///
-/// Honors two environment variables (both treat empty as unset):
+/// Honors spawn override environment variables (all treat empty as unset):
 ///
-/// - `ATM_SPAWN_BIN`: an absolute (or PATH-resolvable) path to the
-///   claude binary. Useful for wrapped installs (e.g. macOS app bundle
-///   at `/Applications/Claude Code.app/Contents/MacOS/claude`) and for
-///   integration tests that inject a fixture. The value is shell-quoted
-///   as one token, so spaces/specials in the path "just work."
+/// - `ATM_SPAWN_<HARNESS>_BIN` / `ATM_SPAWN_<HARNESS>_ARGS`: harness-specific
+///   overrides, where `<HARNESS>` is the canonical id uppercased with `-`
+///   replaced by `_` (for example `ATM_SPAWN_PI_BIN=mise` and
+///   `ATM_SPAWN_PI_ARGS='x pi'`). Use these when one harness needs a custom
+///   launcher without changing other harnesses.
 ///
-/// - `ATM_SPAWN_ARGS`: extra arguments inserted *between* the bin and
-///   the appended `--model` flag. Use this for wrapper commands like
-///   `mise x claude` (`ATM_SPAWN_BIN=mise ATM_SPAWN_ARGS='x claude'`)
-///   or `env FOO=1 claude` (`ATM_SPAWN_BIN=env
-///   ATM_SPAWN_ARGS='FOO=1 claude'`). The value is interpolated
-///   *verbatim*, not re-quoted — that's the whole point, since the
-///   user's intent is multi-token. The user is responsible for quoting
-///   anything inside `ATM_SPAWN_ARGS` that needs to be one token (same
-///   contract as `bash -c "..."`).
+/// - `ATM_SPAWN_BIN` / `ATM_SPAWN_ARGS`: legacy global overrides used when the
+///   harness-specific variables are unset. These intentionally override the
+///   selected harness command and are mainly for tests or whole-install wrappers.
+///
+/// `*_BIN` is shell-quoted as one token, so spaces/specials in a path "just
+/// work." `*_ARGS` is inserted *between* the bin and appended model flag and is
+/// interpolated verbatim — the user's intent is multi-token wrapper syntax. The
+/// user is responsible for quoting anything inside `*_ARGS` that needs to be
+/// one token (same contract as `bash -c "..."`).
 ///
 /// `cwd` and `model` go through `shell_quote`, so a model name like
 /// `opus 4.5` or a cwd with spaces compose safely without the caller
 /// thinking about it.
-fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
-    let base = std::env::var("ATM_SPAWN_BIN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "claude".to_string());
-    let mut cmd = shell_quote(&base);
+#[derive(Debug, Clone, Default, Deserialize)]
+struct AtmConfig {
+    #[serde(default)]
+    harness: HarnessConfig,
+}
 
-    if let Some(args) = std::env::var("ATM_SPAWN_ARGS")
-        .ok()
-        .filter(|s| !s.is_empty())
-    {
+#[derive(Debug, Clone, Default, Deserialize)]
+struct HarnessConfig {
+    /// Default harness id/alias used when `atm spawn` omits `--harness`.
+    default: Option<String>,
+    /// Per-harness spawn overrides from `[harness.<name>]` tables.
+    #[serde(flatten)]
+    definitions: HashMap<String, HarnessTomlConfig>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+struct HarnessTomlConfig {
+    /// Binary or wrapper command to launch.
+    binary: Option<String>,
+    /// Default arguments inserted after `binary` and before any model flag.
+    default_args: Option<Vec<String>>,
+    /// Optional model flag override. Empty string disables model support.
+    model_flag: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct SpawnHarnessDefinition {
+    id: String,
+    binary: String,
+    default_args: Vec<String>,
+    model_flag: Option<String>,
+}
+
+impl SpawnHarnessDefinition {
+    fn from_builtin(definition: &HarnessDefinition) -> Self {
+        Self {
+            id: definition.id.to_string(),
+            binary: definition.binary.to_string(),
+            default_args: definition
+                .default_args
+                .iter()
+                .map(|arg| (*arg).to_string())
+                .collect(),
+            model_flag: definition.model_flag.map(str::to_string),
+        }
+    }
+
+    fn from_custom(id: &str, config: &HarnessTomlConfig) -> Result<Self> {
+        let binary = config
+            .binary
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("custom harness '{id}' requires binary"))?;
+        Ok(Self {
+            id: id.to_string(),
+            binary: binary.to_string(),
+            default_args: config.default_args.clone().unwrap_or_default(),
+            model_flag: config.model_flag.as_deref().and_then(non_empty_str),
+        })
+    }
+
+    fn apply_config(&mut self, config: &HarnessTomlConfig) {
+        if let Some(binary) = config.binary.as_deref().filter(|s| !s.is_empty()) {
+            self.binary = binary.to_string();
+        }
+        if let Some(args) = &config.default_args {
+            self.default_args.clone_from(args);
+        }
+        if let Some(flag) = &config.model_flag {
+            self.model_flag = non_empty_str(flag);
+        }
+    }
+}
+
+fn non_empty_str(s: &str) -> Option<String> {
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
+}
+
+fn config_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|dir| dir.join("atm/config.toml"))
+}
+
+fn default_config_text() -> &'static str {
+    r#"# ATM configuration
+#
+# The default harness is used when `atm spawn` omits `--harness`.
+[harness]
+default = "claude"
+
+# Per-harness defaults override built-ins when no env override is set.
+# Environment precedence: ATM_SPAWN_<HARNESS>_BIN/ARGS, then
+# ATM_SPAWN_BIN/ARGS, then this file, then built-in defaults.
+#
+# Example: make `atm spawn` launch pi through mise:
+# [harness]
+# default = "pi"
+#
+# [harness.pi]
+# binary = "mise"
+# default_args = ["x", "pi"]
+#
+# Example: define a custom harness:
+# [harness.custom]
+# binary = "custom-agent"
+# default_args = ["--profile", "atm"]
+# model_flag = "--model-id"
+"#
+}
+
+fn ensure_default_config_file(path: &std::path::Path) -> Result<()> {
+    if path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create config directory {}", parent.display()))?;
+    }
+    fs::write(path, default_config_text())
+        .with_context(|| format!("Failed to write default config {}", path.display()))
+}
+
+fn load_atm_config() -> Result<AtmConfig> {
+    let Some(path) = config_path() else {
+        return Ok(AtmConfig::default());
+    };
+    if !path.exists() {
+        if let Err(e) = ensure_default_config_file(&path) {
+            warn!(
+                error = %e,
+                path = %path.display(),
+                "Failed to create default config; continuing with built-in defaults"
+            );
+            return Ok(AtmConfig::default());
+        }
+    }
+    let content = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read config {}", path.display()))?;
+    toml::from_str(&content).with_context(|| format!("Failed to parse config {}", path.display()))
+}
+
+fn resolve_spawn_harness(harness_id: Option<&str>) -> Result<SpawnHarnessDefinition> {
+    let config = load_atm_config()?;
+    let requested = harness_id
+        .or(config.harness.default.as_deref())
+        .unwrap_or(default_harness_definition().id);
+
+    if let Some(builtin) = find_harness_definition(requested) {
+        let mut definition = SpawnHarnessDefinition::from_builtin(builtin);
+        if let Some(overlay) = config.harness.definitions.get(builtin.id) {
+            definition.apply_config(overlay);
+        }
+        if let Some(overlay) = config.harness.definitions.get(requested) {
+            definition.apply_config(overlay);
+        }
+        return Ok(definition);
+    }
+
+    if let Some(custom) = config.harness.definitions.get(requested) {
+        return SpawnHarnessDefinition::from_custom(requested, custom);
+    }
+
+    bail!(
+        "unknown harness '{requested}' (available: {})",
+        available_harness_ids_display(&config)
+    )
+}
+
+fn available_harness_ids_display(config: &AtmConfig) -> String {
+    let mut ids: Vec<String> = builtin_harnesses()
+        .map(|definition| definition.id.to_string())
+        .collect();
+    let mut custom_ids: Vec<String> = config.harness.definitions.keys().cloned().collect();
+    custom_ids.sort();
+    for id in custom_ids {
+        if !ids.iter().any(|existing| existing == &id) {
+            ids.push(id);
+        }
+    }
+    ids.join(", ")
+}
+
+fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
+    let harness = resolve_spawn_harness(None).unwrap_or_else(|e| {
+        warn!(error = %e, "Failed to load spawn harness config; using built-in default");
+        SpawnHarnessDefinition::from_builtin(default_harness_definition())
+    });
+    build_spawn_command_for_harness(&harness, cwd, model)
+}
+
+fn harness_spawn_env_key(harness: &SpawnHarnessDefinition, suffix: &str) -> String {
+    format!(
+        "ATM_SPAWN_{}_{}",
+        harness.id.replace('-', "_").to_ascii_uppercase(),
+        suffix
+    )
+}
+
+fn non_empty_env(key: &str) -> Option<String> {
+    std::env::var(key).ok().filter(|s| !s.is_empty())
+}
+
+fn spawn_env_override(harness: &SpawnHarnessDefinition, suffix: &str) -> Option<String> {
+    let harness_key = harness_spawn_env_key(harness, suffix);
+    non_empty_env(&harness_key).or_else(|| non_empty_env(&format!("ATM_SPAWN_{suffix}")))
+}
+
+fn build_spawn_command_for_harness(
+    harness: &SpawnHarnessDefinition,
+    cwd: Option<&str>,
+    model: Option<&str>,
+) -> String {
+    let spawn_bin = spawn_env_override(harness, "BIN");
+    let base = spawn_bin.as_deref().unwrap_or(&harness.binary);
+    let mut cmd = shell_quote(base);
+
+    if spawn_bin.is_none() {
+        for arg in &harness.default_args {
+            cmd.push(' ');
+            cmd.push_str(&shell_quote(arg));
+        }
+    }
+
+    if let Some(args) = spawn_env_override(harness, "ARGS") {
         cmd.push(' ');
         cmd.push_str(args.trim());
     }
 
-    if let Some(m) = model {
-        cmd.push_str(&format!(" --model {}", shell_quote(m)));
+    if let (Some(flag), Some(m)) = (harness.model_flag.as_deref(), model) {
+        cmd.push_str(&format!(" {flag} {}", shell_quote(m)));
     }
     if let Some(dir) = cwd {
         cmd = format!("cd {} && {cmd}", shell_quote(dir));
@@ -832,12 +1055,18 @@ fn build_spawn_command(cwd: Option<&str>, model: Option<&str>) -> String {
 }
 
 async fn cmd_spawn(
+    harness_id: Option<String>,
     model: Option<String>,
     worktree: Option<String>,
     direction: SpawnDirection,
     size: String,
     target_pane: Option<String>,
 ) -> Result<()> {
+    let harness = resolve_spawn_harness(harness_id.as_deref())?;
+    if model.is_some() && harness.model_flag.is_none() {
+        bail!("harness '{}' does not support --model yet", harness.id);
+    }
+
     if !tmux::is_in_tmux() {
         bail!("atm spawn requires running inside tmux");
     }
@@ -877,7 +1106,7 @@ async fn cmd_spawn(
             })
     };
 
-    let claude_cmd = build_spawn_command(cwd.as_deref(), model.as_deref());
+    let agent_cmd = build_spawn_command_for_harness(&harness, cwd.as_deref(), model.as_deref());
 
     let pane_dir: atm_tmux::PaneDirection = direction.into();
     // Split without a command so the pane gets an interactive shell (which has
@@ -889,7 +1118,7 @@ async fn cmd_spawn(
         .context("Failed to split tmux pane")?;
 
     client
-        .send_keys(&new_pane, &claude_cmd)
+        .send_keys(&new_pane, &agent_cmd)
         .await
         .context("Failed to send command to new pane")?;
     client
@@ -1812,13 +2041,14 @@ async fn main() -> Result<()> {
             return setup::uninstall();
         }
         Some(Command::Spawn {
+            harness,
             model,
             worktree,
             direction,
             size,
             target_pane,
         }) => {
-            return cmd_spawn(model, worktree, direction, size, target_pane).await;
+            return cmd_spawn(harness, model, worktree, direction, size, target_pane).await;
         }
         Some(Command::Kill { target }) => {
             return cmd_kill(target).await;
@@ -1996,6 +2226,71 @@ async fn main() -> Result<()> {
 }
 
 #[cfg(test)]
+mod cli_tests {
+    use super::{resolve_spawn_harness, Args, Command};
+    use clap::Parser;
+
+    struct IsolatedConfigHome {
+        _dir: tempfile::TempDir,
+        prev: Option<std::ffi::OsString>,
+    }
+
+    impl IsolatedConfigHome {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
+            let prev = std::env::var_os("XDG_CONFIG_HOME");
+            std::env::set_var("XDG_CONFIG_HOME", dir.path());
+            Self { _dir: dir, prev }
+        }
+    }
+
+    impl Drop for IsolatedConfigHome {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+                None => std::env::remove_var("XDG_CONFIG_HOME"),
+            }
+        }
+    }
+
+    #[test]
+    fn spawn_harness_defaults_to_config_resolution() {
+        let args = Args::try_parse_from(["atm", "spawn"]).unwrap_or_else(|e| panic!("{e}"));
+        match args.command {
+            Some(Command::Spawn { harness, .. }) => assert!(harness.is_none()),
+            other => panic!("expected spawn command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn spawn_harness_parses_long_and_short_flags() {
+        let args = Args::try_parse_from(["atm", "spawn", "--harness", "pi"])
+            .unwrap_or_else(|e| panic!("{e}"));
+        match args.command {
+            Some(Command::Spawn { harness, .. }) => assert_eq!(harness.as_deref(), Some("pi")),
+            other => panic!("expected spawn command, got {other:?}"),
+        }
+
+        let args =
+            Args::try_parse_from(["atm", "spawn", "-H", "codex"]).unwrap_or_else(|e| panic!("{e}"));
+        match args.command {
+            Some(Command::Spawn { harness, .. }) => assert_eq!(harness.as_deref(), Some("codex")),
+            other => panic!("expected spawn command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_spawn_harness_reports_available_ids() {
+        let _config_home = IsolatedConfigHome::new();
+        let err = resolve_spawn_harness(Some("nope")).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown harness 'nope'"));
+        assert!(message.contains("claude"));
+        assert!(message.contains("pi"));
+    }
+}
+
+#[cfg(test)]
 mod prompt_tests {
     use super::extract_prompt;
 
@@ -2073,7 +2368,8 @@ mod prompt_tests {
 
 #[cfg(test)]
 mod spawn_command_tests {
-    use super::build_spawn_command;
+    use super::{build_spawn_command, build_spawn_command_for_harness, resolve_spawn_harness};
+    use std::fs;
 
     /// RAII guard that captures an env var's current value on construction
     /// and restores it on drop (including during unwinding from a failed
@@ -2109,23 +2405,32 @@ mod spawn_command_tests {
     }
 
     /// One single `#[test]`, because all the cases mutate process-global
-    /// env vars (`ATM_SPAWN_BIN` and `ATM_SPAWN_ARGS`), and Rust's
-    /// default test runner runs tests in parallel. Splitting would race.
+    /// spawn env vars, and Rust's default test runner runs tests in parallel.
+    /// Splitting would race.
     /// (`serial_test` would solve that but isn't worth a dep just here.)
     #[test]
     fn build_spawn_command_cases() {
         let bin = EnvGuard::capture("ATM_SPAWN_BIN");
         let args = EnvGuard::capture("ATM_SPAWN_ARGS");
+        let pi_bin = EnvGuard::capture("ATM_SPAWN_PI_BIN");
+        let pi_args = EnvGuard::capture("ATM_SPAWN_PI_ARGS");
+        let config_home = EnvGuard::capture("XDG_CONFIG_HOME");
+        let config_dir = tempfile::tempdir().unwrap_or_else(|e| panic!("{e}"));
 
-        // Start clean — captured `bin` and `args` will be restored on
-        // drop regardless of which scenarios run/panic below.
+        // Start clean — captured env vars will be restored on drop regardless
+        // of which scenarios run/panic below.
         bin.unset();
         args.unset();
+        pi_bin.unset();
+        pi_args.unset();
+        std::env::set_var("XDG_CONFIG_HOME", config_dir.path());
 
-        // 1. Unset env → default to single-quoted "claude".
+        // 1. Unset env/config → default to single-quoted "claude" and
+        //    auto-create a starter config file.
         //    `'claude'` is identical to bare `claude` for execve;
         //    quoting just removes shell-parsing surprises elsewhere.
         assert_eq!(build_spawn_command(None, None), "'claude'");
+        assert!(config_dir.path().join("atm/config.toml").exists());
 
         // 2. Empty value is treated as unset.
         bin.set("");
@@ -2201,7 +2506,73 @@ mod spawn_command_tests {
             "cd '/work/dir' && 'direnv' exec . claude --model 'opus'"
         );
 
+        // 13. Explicit harness selection changes the launched binary while
+        //     retaining model/cwd composition.
+        bin.unset();
+        args.unset();
+        let pi = resolve_spawn_harness(Some("pi")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            build_spawn_command_for_harness(&pi, Some("/work/dir"), Some("gpt-5.5")),
+            "cd '/work/dir' && 'pi' --model 'gpt-5.5'"
+        );
+
+        let codex = resolve_spawn_harness(Some("codex")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            build_spawn_command_for_harness(&codex, None, None),
+            "'codex'"
+        );
+
+        // 14. Harness-specific overrides take precedence over the legacy
+        //     global overrides, so users can customize one harness without
+        //     changing every `atm spawn --harness ...` invocation.
+        bin.set("global-bin");
+        args.set("global args");
+        pi_bin.set("mise");
+        pi_args.set("x pi");
+        assert_eq!(
+            build_spawn_command_for_harness(&pi, None, Some("gpt-5.5")),
+            "'mise' x pi --model 'gpt-5.5'"
+        );
+
+        // 15. Without a harness-specific override, legacy globals still apply
+        //     as an intentional whole-command override.
+        pi_bin.unset();
+        pi_args.unset();
+        assert_eq!(
+            build_spawn_command_for_harness(&pi, None, None),
+            "'global-bin' global args"
+        );
+
+        // 16. Config can set the default harness and per-harness spawn defaults.
+        bin.unset();
+        args.unset();
+        let atm_config_dir = config_dir.path().join("atm");
+        fs::create_dir_all(&atm_config_dir).unwrap_or_else(|e| panic!("{e}"));
+        fs::write(
+            atm_config_dir.join("config.toml"),
+            "[harness]\ndefault = 'pi'\n\n[harness.pi]\nbinary = 'mise'\ndefault_args = ['x', 'pi']\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            build_spawn_command(None, Some("gpt-5.5")),
+            "'mise' 'x' 'pi' --model 'gpt-5.5'"
+        );
+
+        // 17. Config can define a custom harness.
+        fs::write(
+            atm_config_dir.join("config.toml"),
+            "[harness.custom]\nbinary = 'custom-agent'\ndefault_args = ['--profile', 'atm']\nmodel_flag = '--model-id'\n",
+        )
+        .unwrap_or_else(|e| panic!("{e}"));
+        let custom = resolve_spawn_harness(Some("custom")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            build_spawn_command_for_harness(&custom, None, Some("abc")),
+            "'custom-agent' '--profile' 'atm' --model-id 'abc'"
+        );
+
         // env's Drop restores the captured values, even if any of the
         // assert_eq!s above panicked.
+        let _ = config_home;
+        let _ = config_dir;
     }
 }
