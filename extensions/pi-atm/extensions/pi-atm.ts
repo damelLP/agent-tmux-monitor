@@ -400,12 +400,12 @@ export default function (pi: ExtensionAPI): void {
 					uiPatched = patchUiSelectOnce(ctx, () => cachedSessionId);
 				}
 				const envelope = buildEnvelope(eventName, payload, cachedSessionId);
-				// Fire-and-forget: pi's flow proceeds without waiting on us.
-				// The daemon is best-effort observability; if it's slow or
-				// down we should never gate pi's progress on our send.
-				// The internal Promise still self-resolves via timeout/close
-				// so Node's event loop drains correctly.
-				void send(envelope);
+				// Fire-and-forget: `send()` is synchronous and returns
+				// `void` — it either writes to the live socket, queues
+				// onto the bounded outbox, or drops on the floor when a
+				// reconnect back-off is in effect. None of those gate
+				// pi's flow.
+				send(envelope);
 			} catch (e) {
 				logDebug(`handler threw on ${eventName}: ${(e as Error).message}`);
 			}

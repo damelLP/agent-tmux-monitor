@@ -416,12 +416,25 @@ impl ConnectionHandler {
             "Processing hook event"
         );
 
-        let lifecycle = raw_event.to_lifecycle_event().ok_or_else(|| {
-            ConnectionError::ParseError(format!(
-                "Unknown hook event type: '{}' (session_id={}, tool_name={:?})",
-                raw_event.hook_event_name, raw_event.session_id, raw_event.tool_name
-            ))
-        })?;
+        // Symmetric with `handle_pi_event`'s suppression-skip below:
+        // `to_lifecycle_event` returns `None` for two reasons that
+        // shouldn't crash the connection layer — unknown
+        // `hook_event_name` (a future Claude event we don't translate
+        // yet) and known-but-malformed payloads (e.g. `PreToolUse`
+        // without a `tool_name`, dropped by the empty-tool_name
+        // guard). Log either case at debug and move on.
+        let lifecycle = match raw_event.to_lifecycle_event() {
+            Some(le) => le,
+            None => {
+                debug!(
+                    hook_event_name = %raw_event.hook_event_name,
+                    event_type = ?raw_event.event_type(),
+                    tool_name = ?raw_event.tool_name,
+                    "hook event suppressed by adapter"
+                );
+                return Ok(());
+            }
+        };
 
         let session_id = raw_event.session_id();
         let pid = raw_event.pid;
