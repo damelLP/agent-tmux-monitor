@@ -207,7 +207,7 @@ jobs:
 
   release:
     name: Create Release
-    needs: [prepare, build]
+    needs: [prepare, build, publish]
     if: needs.prepare.outputs.should_release == 'true'
     runs-on: ubuntu-latest
 
@@ -243,8 +243,11 @@ jobs:
 
   publish:
     name: Publish to crates.io
+    needs: prepare
     runs-on: ubuntu-latest
-    if: github.event_name == 'workflow_dispatch' && github.event.inputs.publish_crates == 'true'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.event.inputs.publish_crates == 'true') ||
+      (github.event_name == 'push' && needs.prepare.outputs.should_release == 'true')
 
     env:
       CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
@@ -269,26 +272,31 @@ jobs:
           ORIGINAL_ORDER=("atm-core" "atm-protocol" "atm-tmux" "atm-claude-adapter" "atm-pi-adapter" "atmd" "atm-tui" "atm")
 
           selected=()
-          # Using jq (available on GitHub ubuntu runners) to read the dispatch inputs
-          for box in publish_atm_core publish_atm_protocol publish_atm_tmux publish_atm_claude_adapter publish_atm_pi_adapter publish_atm_tui publish_atmd publish_atm; do
-            val=$(jq -r --arg k "$box" '.inputs[$k] // "false"' "$EVENT_JSON" 2>/dev/null || echo "false")
-            if [ "$(echo "$val" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
-              case "$box" in
-                publish_atm_core) selected+=("atm-core");;
-                publish_atm_protocol) selected+=("atm-protocol");;
-                publish_atm_tmux) selected+=("atm-tmux");;
-                publish_atm_claude_adapter) selected+=("atm-claude-adapter");;
-                publish_atm_pi_adapter) selected+=("atm-pi-adapter");;
-                publish_atm_tui) selected+=("atm-tui");;
-                publish_atmd) selected+=("atmd");;
-                publish_atm) selected+=("atm");;
-              esac
-            fi
-          done
+          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ]; then
+            # Using jq (available on GitHub ubuntu runners) to read the dispatch inputs.
+            for box in publish_atm_core publish_atm_protocol publish_atm_tmux publish_atm_claude_adapter publish_atm_pi_adapter publish_atm_tui publish_atmd publish_atm; do
+              val=$(jq -r --arg k "$box" '.inputs[$k] // "false"' "$EVENT_JSON" 2>/dev/null || echo "false")
+              if [ "$(echo "$val" | tr '[:upper:]' '[:lower:]')" = "true" ]; then
+                case "$box" in
+                  publish_atm_core) selected+=("atm-core");;
+                  publish_atm_protocol) selected+=("atm-protocol");;
+                  publish_atm_tmux) selected+=("atm-tmux");;
+                  publish_atm_claude_adapter) selected+=("atm-claude-adapter");;
+                  publish_atm_pi_adapter) selected+=("atm-pi-adapter");;
+                  publish_atm_tui) selected+=("atm-tui");;
+                  publish_atmd) selected+=("atmd");;
+                  publish_atm) selected+=("atm");;
+                esac
+              fi
+            done
 
-          if [ "${#selected[@]}" -eq 0 ]; then
-            echo "::error::No crates selected via checkboxes. Set at least one publish_* checkbox to true in the dispatch form."
-            exit 1
+            if [ "${#selected[@]}" -eq 0 ]; then
+              echo "::error::No crates selected via checkboxes. Set at least one publish_* checkbox to true in the dispatch form."
+              exit 1
+            fi
+          else
+            # Automatic version-bump releases publish every workspace crate.
+            selected=("${ORIGINAL_ORDER[@]}")
           fi
 
           # Compose publish order by filtering ORIGINAL_ORDER
