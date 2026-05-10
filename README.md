@@ -3,11 +3,11 @@
 [![Build Status](https://github.com/damelLP/agent-tmux-manager/actions/workflows/release.yml/badge.svg)](https://github.com/damelLP/agent-tmux-manager/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Real-time management for Claude Code agents across tmux sessions.
+Real-time management for coding agents across tmux sessions.
 
 ## What it does
 
-ATM gives you a live dashboard and CLI for every Claude Code agent running in tmux. See context usage, cost, model, and activity at a glance — and control agents without switching panes.
+ATM gives you a live dashboard and CLI for coding agents running in tmux, including Claude Code and pi. See context usage, cost, model, and activity at a glance — and control agents without switching panes.
 
 - **Dashboard** — real-time TUI with session tree, context bars, cost tracking, and live terminal capture
 - **Agent control** — spawn, kill, interrupt, send text, and reply to prompts from the CLI
@@ -33,12 +33,30 @@ cargo install atm && atm setup
 atm                    # launch TUI (starts daemon automatically)
 ```
 
-Sessions appear as you use Claude Code. Press `Enter` to jump to any session, `q` to quit.
+Sessions appear as you use supported coding-agent harnesses. Press `Enter` to jump to any session, `q` to quit.
 
 ## CLI at a glance
 
 ```bash
-atm spawn -m opus -d right         # spawn agent with model and direction
+atm spawn -m opus -d right         # spawn default harness with model and direction
+atm spawn --harness pi             # spawn a specific harness
+ATM_SPAWN_PI_BIN=mise ATM_SPAWN_PI_ARGS='x pi' atm spawn --harness pi
+```
+
+ATM auto-creates `~/.config/atm/config.toml` with defaults when spawn config is first loaded. Default spawn harness and per-harness spawn defaults can be configured there:
+
+```toml
+[harness]
+default = "pi"
+
+[harness.pi]
+binary = "mise"
+default_args = ["x", "pi"]
+```
+
+Environment overrides still take precedence when set (`ATM_SPAWN_PI_BIN/ARGS`, then legacy `ATM_SPAWN_BIN/ARGS`); otherwise config values are used, then built-in defaults.
+
+```
 atm kill <id>                      # kill agent and close pane
 atm interrupt <id>                 # Ctrl+C an agent
 atm send <id> "fix the tests"     # send text to agent
@@ -55,10 +73,10 @@ atm layout pair                    # two agents + ATM sidebar
 ## How it works
 
 ```
-Claude Code  ──hook──▶  atmd (daemon)  ◀──socket──  atm (TUI/CLI)
+Claude Code / pi  ──hook/extension──▶  atmd (daemon)  ◀──socket──  atm (TUI/CLI)
 ```
 
-`atm setup` registers hooks in `~/.claude/settings.json`. Claude Code fires events on every tool use, status update, and lifecycle change. The `atm-hook` script forwards these to the `atmd` daemon over a Unix socket, and `atm` connects for real-time display.
+`atm setup` registers supported harness integrations (Claude Code hooks and the pi extension). Harness events are forwarded to the `atmd` daemon over a Unix socket, and `atm` connects for real-time display.
 
 ## Documentation
 

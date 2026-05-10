@@ -20,15 +20,25 @@ use std::fmt;
 
 /// Which coding-agent harness is driving this session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[non_exhaustive]
 #[serde(rename_all = "snake_case")]
 pub enum Harness {
     /// Claude Code (Anthropic).
     ClaudeCode,
     /// pi (<https://pi.dev/>) — provider-agnostic harness.
     Pi,
+    /// OpenAI Codex CLI.
+    Codex,
+    /// Amp coding agent.
+    Amp,
+    /// Qwen Code CLI.
+    Qwen,
+    /// Gemini CLI.
+    Gemini,
     /// Unknown harness — discovered via process scanning before any
     /// adapter event arrived, or a future harness we haven't tagged.
     #[default]
+    #[serde(other)]
     Unknown,
 }
 
@@ -39,6 +49,10 @@ impl Harness {
         match self {
             Self::ClaudeCode => "claude",
             Self::Pi => "pi",
+            Self::Codex => "codex",
+            Self::Amp => "amp",
+            Self::Qwen => "qwen",
+            Self::Gemini => "gemini",
             Self::Unknown => "?",
         }
     }
@@ -49,6 +63,10 @@ impl fmt::Display for Harness {
         f.write_str(match self {
             Self::ClaudeCode => "Claude Code",
             Self::Pi => "pi",
+            Self::Codex => "Codex CLI",
+            Self::Amp => "Amp",
+            Self::Qwen => "Qwen Code",
+            Self::Gemini => "Gemini CLI",
             Self::Unknown => "unknown",
         })
     }
@@ -65,6 +83,13 @@ mod tests {
             "\"claude_code\""
         );
         assert_eq!(serde_json::to_string(&Harness::Pi).unwrap(), "\"pi\"");
+        assert_eq!(serde_json::to_string(&Harness::Codex).unwrap(), "\"codex\"");
+        assert_eq!(serde_json::to_string(&Harness::Amp).unwrap(), "\"amp\"");
+        assert_eq!(serde_json::to_string(&Harness::Qwen).unwrap(), "\"qwen\"");
+        assert_eq!(
+            serde_json::to_string(&Harness::Gemini).unwrap(),
+            "\"gemini\""
+        );
         assert_eq!(
             serde_json::to_string(&Harness::Unknown).unwrap(),
             "\"unknown\""
@@ -80,6 +105,10 @@ mod tests {
     fn short_tag_matches_display_intent() {
         assert_eq!(Harness::ClaudeCode.short_tag(), "claude");
         assert_eq!(Harness::Pi.short_tag(), "pi");
+        assert_eq!(Harness::Codex.short_tag(), "codex");
+        assert_eq!(Harness::Amp.short_tag(), "amp");
+        assert_eq!(Harness::Qwen.short_tag(), "qwen");
+        assert_eq!(Harness::Gemini.short_tag(), "gemini");
         assert_eq!(Harness::Unknown.short_tag(), "?");
     }
 }
