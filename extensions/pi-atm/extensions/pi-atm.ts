@@ -50,10 +50,14 @@ const FORWARDED_EVENTS = [
 	"model_select",
 	"input",
 	"session_before_compact",
-	// `context` carries cumulative cost/tokens. It fires per provider
-	// request; the daemon-side translator extracts only the latest
-	// `usage.{cost.total, totalTokens}` so the wire payload is small
-	// even though pi attaches the full conversation snapshot.
+	// `context` carries cumulative cost/tokens that drive the TUI's
+	// cost + context-percentage display. NOTE: pi attaches the full
+	// conversation snapshot (every assistant message), so this is
+	// the largest payload we forward — tens to hundreds of KB per
+	// fire on long sessions. The daemon-side translator extracts
+	// only the latest `usage.{cost.total, totalTokens}`, but the
+	// wire payload is *not* small. The bounded outbox + drop-oldest
+	// in send() exists precisely for this case.
 	"context",
 ] as const;
 
@@ -185,7 +189,18 @@ function send(envelope: unknown): void {
 		type: "pi_event",
 		data: envelope,
 	};
-	const line = `${JSON.stringify(dataMsg)}\n`;
+	// JSON.stringify can throw on circular references or unsupported
+	// values (BigInt, etc). Pi event payloads shouldn't contain
+	// either, but the wrapping handler in the event subscription
+	// promises send() never throws — honour that here so a
+	// surprising payload doesn't crash pi's flow.
+	let line: string;
+	try {
+		line = `${JSON.stringify(dataMsg)}\n`;
+	} catch (e) {
+		logDebug(`stringify failed, dropping event: ${(e as Error).message}`);
+		return;
+	}
 
 	if (activeSocket) {
 		try {
@@ -245,17 +260,22 @@ function buildEnvelope(eventName: string, payload: unknown, sessionId: string | 
  * If patching fails (different pi version, future API change), we log
  * and proceed — the rest of the extension still works.
  */
+/**
+ * Returns `true` iff `ctx.ui.select` was wrapped (or had been wrapped
+ * by a previous call). Returns `false` when `ctx.ui.select` isn't yet
+ * available — the caller should keep retrying on later events.
+ */
 function patchUiSelectOnce(
 	ctx: unknown,
 	getSessionId: () => string | undefined,
-): void {
+): boolean {
 	const ctxAny = ctx as { ui?: { select?: unknown; __atmPatched?: boolean } };
 	const ui = ctxAny.ui;
 	if (!ui || typeof ui.select !== "function") {
 		logDebug("patchUiSelectOnce: no ui.select to patch");
-		return;
+		return false;
 	}
-	if (ui.__atmPatched) return; // already wrapped
+	if (ui.__atmPatched) return true; // already wrapped
 	const originalSelect = ui.select.bind(ui) as (
 		title: string,
 		options: string[],
@@ -281,6 +301,7 @@ function patchUiSelectOnce(
 	};
 	ui.__atmPatched = true;
 	logDebug("patchUiSelectOnce: ui.select wrapped");
+	return true;
 }
 
 export default function (pi: ExtensionAPI): void {
@@ -307,13 +328,14 @@ export default function (pi: ExtensionAPI): void {
 					cachedSessionId = ctxAny.sessionManager?.currentSessionId;
 				}
 				if (!uiPatched) {
-					// Patch `ctx.ui.select` once, the first time we have a ctx.
-					// We do it lazily because at extension-load time the runner
-					// may not have its ui bound yet. Pass a getter so the patched
-					// closure always reads the current `cachedSessionId`, even if
-					// patching ran before the id was discovered.
-					patchUiSelectOnce(ctx, () => cachedSessionId);
-					uiPatched = true;
+					// Patch `ctx.ui.select` once, the first time we have a ctx
+					// with `ui` bound. Early events can fire before the runner
+					// attaches `ui`, so retry on each event until the patch
+					// actually takes — `patchUiSelectOnce` returns `false`
+					// when there's nothing to patch yet. Pass a getter so the
+					// patched closure reads the *current* `cachedSessionId`,
+					// even if patching ran before the id was discovered.
+					uiPatched = patchUiSelectOnce(ctx, () => cachedSessionId);
 				}
 				const envelope = buildEnvelope(eventName, payload, cachedSessionId);
 				// Fire-and-forget: pi's flow proceeds without waiting on us.

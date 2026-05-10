@@ -27,7 +27,23 @@ impl RawHookEvent {
     /// variants.
     pub fn to_lifecycle_event(&self) -> Option<LifecycleEvent> {
         let ev = self.event_type()?;
-        let tool = Tool::from(self.tool_name.as_deref().unwrap_or(""));
+        // Tool-name presence is required for the three tool-shaped
+        // events. A PreToolUse / PostToolUse / PostToolUseFailure
+        // without a tool_name is malformed; returning `None` (treat as
+        // unknown event) is safer than fabricating `Tool::Other("")`,
+        // which would silently inject phantom tool-call records into
+        // the registry.
+        let needs_tool = matches!(
+            ev,
+            ClaudeEventType::PreToolUse
+                | ClaudeEventType::PostToolUse
+                | ClaudeEventType::PostToolUseFailure
+        );
+        let tool_name = self.tool_name.as_deref().unwrap_or("");
+        if needs_tool && tool_name.is_empty() {
+            return None;
+        }
+        let tool = Tool::from(tool_name);
         Some(match ev {
             ClaudeEventType::PreToolUse => {
                 if tool.is_interactive() {

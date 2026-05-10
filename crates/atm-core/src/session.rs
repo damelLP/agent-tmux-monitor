@@ -773,14 +773,19 @@ impl SessionDomain {
                 }
                 if let Some(t) = tokens {
                     // Pi reports cumulative total tokens for the
-                    // session. We store it as `total_input_tokens`
-                    // (matching how the Claude status-line path
-                    // populates this field with cumulative input
-                    // counts). This is admittedly a slight
-                    // semantic mismatch (input vs total), but it
-                    // gives the TUI a non-zero number to display
-                    // and tracks growth over the session.
-                    self.context.total_input_tokens = TokenCount::new(*t);
+                    // session. The TUI's percentage display reads
+                    // `context_tokens()` which sums Claude's
+                    // current_input + cache_read + cache_creation —
+                    // none of which pi populates. To make pi sessions
+                    // surface a non-zero context bar, mirror pi's
+                    // cumulative figure into `current_input_tokens`
+                    // (the largest summand of `context_tokens()`).
+                    // Also keep `total_input_tokens` set for the
+                    // detail-panel "total tokens" display, even though
+                    // it doesn't affect the percentage.
+                    let count = TokenCount::new(*t);
+                    self.context.current_input_tokens = count;
+                    self.context.total_input_tokens = count;
                 }
                 // Status unchanged: cost/token updates don't
                 // imply a state transition.
