@@ -774,6 +774,28 @@ impl RegistryActor {
                         );
                         session.harness = harness;
                         session.tmux_pane = tmux_pane.clone();
+
+                        // Read cwd from /proc/{pid}/cwd and resolve
+                        // project/worktree info — mirrors what
+                        // `handle_register_discovered` does for
+                        // /proc-discovered sessions, so a session
+                        // created via a vendor adapter event lands
+                        // grouped under the right project / branch
+                        // from frame one. Without this, lifecycle-
+                        // event-created sessions fall into the
+                        // "Other" tree bucket because their
+                        // working_directory is None.
+                        let proc_cwd = std::fs::read_link(format!("/proc/{p}/cwd")).ok();
+                        if let Some(cwd) = &proc_cwd {
+                            let cwd_str = cwd.to_string_lossy().to_string();
+                            session.project_root = atm_core::resolve_project_root(&cwd_str);
+                            let (wt_path, wt_branch) =
+                                atm_core::resolve_worktree_info(&cwd_str);
+                            session.worktree_path = wt_path;
+                            session.worktree_branch = wt_branch;
+                            session.working_directory = Some(cwd_str);
+                        }
+
                         let mut infra = SessionInfrastructure::new();
                         infra.set_pid(p);
 
